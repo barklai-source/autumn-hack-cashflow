@@ -1,6 +1,7 @@
 import pandas as pd
 from io import StringIO
 
+from src.data import loader
 from src.data.loader import daily_balances, detect_columns, normalize_statement, read_statement
 
 
@@ -9,6 +10,24 @@ def test_read_csv_detects_semicolon_and_decimal_comma():
     assert frame.iloc[0]["Сумма"] == "1.234,50"
     result = normalize_statement(frame)
     assert result.operations.iloc[0]["amount"] == 1234.5
+
+
+def test_read_statement_file_is_cached(tmp_path, monkeypatch):
+    path = tmp_path / "statement.csv"
+    path.write_text("Дата;Сумма\n01.03.2025;100\n", encoding="utf-8-sig")
+    original_read_csv = pd.read_csv
+    calls = []
+
+    def counted_read_csv(*args, **kwargs):
+        calls.append(args[0])
+        return original_read_csv(*args, **kwargs)
+
+    monkeypatch.setattr(loader.pd, "read_csv", counted_read_csv)
+
+    read_statement(str(path), "statement.csv")
+    read_statement(str(path), "statement.csv")
+
+    assert len(calls) == 1
 
 
 def test_russian_csv_columns_and_direction_signs():

@@ -57,10 +57,11 @@ class TransactionClassifier:
         ])
         self.is_fitted = False
 
-    def fit(self, texts: list[str], labels: list[str]) -> "TransactionClassifier":
+    def fit(self, texts: list[str], labels: list[str], sample_weights: list[float] | None = None) -> "TransactionClassifier":
         if len(texts) < 8 or len(set(labels)) < 2:
             raise ValueError("Для обучения нужно не менее 8 размеченных операций и двух категорий.")
-        self.pipeline.fit(texts, labels)
+        fit_options = {"model__sample_weight": sample_weights} if sample_weights is not None else {}
+        self.pipeline.fit(texts, labels, **fit_options)
         self.is_fitted = True
         return self
 

@@ -6,5 +6,6 @@ scikit-learn>=1.6,<2
 pydantic>=2.10,<3
 python-multipart>=0.0.20,<1
 httpx>=0.28,<1
+httpx2>=2.16,<3
 pytest>=8.3,<9
 openpyxl>=3.1,<4

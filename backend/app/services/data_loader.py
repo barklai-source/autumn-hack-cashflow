@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import hashlib
+import re
+from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 import pandas as pd
@@ -35,6 +38,15 @@ COMPANY_ALIASES = {
 REQUIRED_OPERATIONS = ("company_id", "operation_id", "operation_date", "amount", "direction", "balance_eod")
 
 
+def _generated_company_inn(company_id: str) -> str:
+    match = re.fullmatch(r"C(\d{3})", company_id)
+    if match is not None:
+        number = int(match.group(1))
+        return f"770100{number * 1001 % 10000:04d}"
+    suffix = int.from_bytes(hashlib.sha256(company_id.encode("utf-8")).digest()[:4], "big") % 1_000_000
+    return f"770{suffix:07d}"
+
+
 def _column_map(columns: list[object], aliases: dict[str, tuple[str, ...]]) -> dict[str, str]:
     lookup = {str(column).strip().lower().replace("ё", "е"): str(column) for column in columns}
     result = {}
@@ -49,7 +61,20 @@ def _column_map(columns: list[object], aliases: dict[str, tuple[str, ...]]) -> d
 
 def read_csv(path: Path, dtypes: dict[str, str] | None = None) -> pd.DataFrame:
     """Read the case CSV format with BOM, semicolon and string identifiers."""
-    return pd.read_csv(path, sep=";", encoding="utf-8-sig", dtype=dtypes, low_memory=False)
+    resolved = path.resolve()
+    stat = resolved.stat()
+    dtype_key = tuple(sorted((dtypes or {}).items()))
+    return _read_csv_cached(str(resolved), stat.st_mtime_ns, stat.st_size, dtype_key).copy(deep=True)
+
+
+@lru_cache(maxsize=128)
+def _read_csv_cached(
+    path: str,
+    _modified_ns: int,
+    _size: int,
+    dtypes: tuple[tuple[str, str], ...],
+) -> pd.DataFrame:
+    return pd.read_csv(path, sep=";", encoding="utf-8-sig", dtype=dict(dtypes), low_memory=False)
 
 
 @dataclass
@@ -59,6 +84,7 @@ class Dataset:
     status: str
     message: str
     errors: list[str]
+    daily_flows: dict[str, pd.DataFrame] = field(default_factory=dict)
 
     def company_operations(self, company_id: str) -> pd.DataFrame:
         if self.operations.empty:
@@ -71,6 +97,52 @@ class Dataset:
 
 
 def load_dataset(data_dir: Path = DATA_DIR) -> Dataset:
+    resolved_dir = data_dir.resolve()
+    signature = _dataset_signature(resolved_dir)
+    cached = _load_dataset_cached(str(resolved_dir), signature)
+    return Dataset(
+        cached.companies.copy(deep=True),
+        cached.operations.copy(deep=True),
+        cached.status,
+        cached.message,
+        list(cached.errors),
+        {company_id: flows.copy(deep=True) for company_id, flows in cached.daily_flows.items()},
+    )
+
+
+def _dataset_signature(data_dir: Path) -> tuple[tuple[str, int, int], ...]:
+    companies_path = data_dir / "companies.csv"
+    combined_path = data_dir / "all_operations.csv"
+    paths = [companies_path, combined_path]
+    if not combined_path.is_file():
+        paths.extend(sorted((data_dir / "statements").glob("*.csv")))
+    signature = []
+    for path in paths:
+        try:
+            stat = path.stat()
+        except OSError:
+            signature.append((str(path), -1, -1))
+        else:
+            signature.append((str(path), stat.st_mtime_ns, stat.st_size))
+    return tuple(signature)
+
+
+@lru_cache(maxsize=1)
+def _load_dataset_cached(data_dir: str, _signature: tuple[tuple[str, int, int], ...]) -> Dataset:
+    return _load_dataset_uncached(Path(data_dir))
+
+
+def clear_dataset_caches() -> None:
+    """Drop normalized CSV and dataset snapshots before an explicit reload."""
+    _read_csv_cached.cache_clear()
+    _load_dataset_cached.cache_clear()
+    _load_operations_file_cached.cache_clear()
+    from src.data.loader import _read_statement_file
+
+    _read_statement_file.cache_clear()
+
+
+def _load_dataset_uncached(data_dir: Path = DATA_DIR) -> Dataset:
     """Load company catalog and either combined OR per-company statements."""
     companies_path = data_dir / "companies.csv"
     combined_path = data_dir / "all_operations.csv"
@@ -90,6 +162,12 @@ def load_dataset(data_dir: Path = DATA_DIR) -> Dataset:
                 companies[column] = ""
         companies["name"] = companies["name"].fillna(companies["company_id"]).astype(str)
         companies["inn"] = companies["inn"].fillna("").astype(str)
+        companies["inn"] = companies.apply(
+            lambda company: company["inn"].strip()
+            if re.fullmatch(r"\d{10}|\d{12}", company["inn"].strip())
+            else _generated_company_inn(str(company["company_id"])),
+            axis=1,
+        )
     except (OSError, UnicodeError, pd.errors.ParserError, ValueError) as error:
         LOGGER.exception("Unable to load company catalog from %s", companies_path)
         return Dataset(pd.DataFrame(), pd.DataFrame(), "invalid", f"Ошибка чтения справочника компаний: {error}", [str(error)])
@@ -99,7 +177,7 @@ def load_dataset(data_dir: Path = DATA_DIR) -> Dataset:
             operations = _load_operations_file(combined_path)
         elif statements_dir.is_dir():
             frames = []
-            for statement_path in sorted(statements_dir.glob("C*.csv")):
+            for statement_path in sorted(statements_dir.glob("*.csv")):
                 try:
                     frames.append(_load_operations_file(statement_path))
                 except (OSError, UnicodeError, pd.errors.ParserError, ValueError) as error:
@@ -118,25 +196,50 @@ def load_dataset(data_dir: Path = DATA_DIR) -> Dataset:
     known_ids = set(companies["company_id"].astype(str))
     operations = operations.loc[operations["company_id"].astype(str).isin(known_ids)].copy()
     companies = companies.drop_duplicates("company_id", keep="first").reset_index(drop=True)
+    daily_flows = {
+        str(company_id): _daily_flows(company_operations)
+        for company_id, company_operations in operations.groupby("company_id", sort=False)
+    }
     status = "ready" if len(companies) else "incomplete"
     return Dataset(companies, operations.reset_index(drop=True), status,
-                   f"Загружено компаний: {len(companies)}; операций: {len(operations)}.", errors)
+                   f"Загружено компаний: {len(companies)}; операций: {len(operations)}.", errors, daily_flows)
+
+
+def _daily_flows(operations: pd.DataFrame) -> pd.DataFrame:
+    if operations.empty:
+        return pd.DataFrame(columns=["date", "inflow", "outflow", "net_flow"])
+    daily = operations.groupby("date")["amount"].agg(
+        inflow=lambda amounts: amounts[amounts > 0].sum(),
+        outflow=lambda amounts: -amounts[amounts < 0].sum(),
+        net_flow="sum",
+    )
+    daily = daily.asfreq("D", fill_value=0).fillna(0)
+    daily.index.name = "date"
+    return daily.reset_index()
 
 
 def _load_operations_file(path: Path) -> pd.DataFrame:
-    raw = read_csv(path, {"company_id": "string", "operation_id": "string", "counterparty_inn": "string"})
+    resolved = path.resolve()
+    stat = resolved.stat()
+    return _load_operations_file_cached(str(resolved), stat.st_mtime_ns, stat.st_size).copy(deep=True)
+
+
+@lru_cache(maxsize=128)
+def _load_operations_file_cached(path: str, _modified_ns: int, _size: int) -> pd.DataFrame:
+    source_path = Path(path)
+    raw = read_csv(source_path, {"company_id": "string", "operation_id": "string", "counterparty_inn": "string"})
     mapped = _column_map(list(raw.columns), OPERATION_ALIASES)
     missing = [field for field in REQUIRED_OPERATIONS if field not in mapped]
     if missing:
-        if "company_id" not in mapped and path.parent.name == "statements":
-            raw["company_id"] = path.stem
+        if "company_id" not in mapped and source_path.parent.name == "statements":
+            raw["company_id"] = source_path.stem
             mapped["company_id"] = "company_id"
             missing.remove("company_id")
         if missing:
             raise ValueError("Не хватает полей: " + ", ".join(missing))
     operations = raw.rename(columns={value: key for key, value in mapped.items()}).copy()
     if "operation_id" not in operations:
-        operations["operation_id"] = [f"{path.stem}-{index}" for index in range(len(operations))]
+        operations["operation_id"] = [f"{source_path.stem}-{index}" for index in range(len(operations))]
     operations["company_id"] = operations["company_id"].astype("string").str.strip()
     operations["operation_id"] = operations["operation_id"].astype("string").str.strip()
     operations["operation_date"] = pd.to_datetime(operations["operation_date"], errors="coerce")

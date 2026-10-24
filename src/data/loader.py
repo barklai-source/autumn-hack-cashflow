@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import lru_cache
 from io import BytesIO, StringIO
 import math
+from pathlib import Path
 from typing import BinaryIO, TextIO
 
 import pandas as pd
@@ -66,6 +68,15 @@ def detect_columns(columns: list[object]) -> dict[str, str]:
 def read_statement(source: str | bytes | BinaryIO | TextIO, filename: str = "") -> pd.DataFrame:
     """Read CSV or Excel input, inferring CSV delimiter and encoding."""
     suffix = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+    if isinstance(source, str):
+        path = Path(source)
+        try:
+            stat = path.stat()
+        except (OSError, ValueError):
+            pass
+        else:
+            if path.is_file():
+                return _read_statement_file(str(path.resolve()), stat.st_mtime_ns, stat.st_size, suffix).copy(deep=True)
     if suffix in {"xlsx", "xls"}:
         return pd.read_excel(source)
     if isinstance(source, bytes):
@@ -78,6 +89,16 @@ def read_statement(source: str | bytes | BinaryIO | TextIO, filename: str = "") 
         if hasattr(source, "seek"):
             source.seek(0)
         return pd.read_csv(source, sep=None, engine="python", encoding="cp1251", decimal=",")
+
+
+@lru_cache(maxsize=64)
+def _read_statement_file(path: str, _modified_ns: int, _size: int, suffix: str) -> pd.DataFrame:
+    if suffix in {"xlsx", "xls"}:
+        return pd.read_excel(path)
+    try:
+        return pd.read_csv(path, sep=None, engine="python", encoding="utf-8-sig", decimal=",")
+    except UnicodeDecodeError:
+        return pd.read_csv(path, sep=None, engine="python", encoding="cp1251", decimal=",")
 
 
 def parse_money(value: object) -> float:

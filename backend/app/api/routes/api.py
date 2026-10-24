@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import sqlite3
 from datetime import date
 
 import numpy as np
@@ -10,12 +11,23 @@ import pandas as pd
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse
 
-from app.schemas.api import CategoryPatch, EventCreate, EventPatch, RecurringPatch
+from app.core.auth import (
+    DEMO_INN_ORDINALS,
+    authenticate_user,
+    create_session_token,
+    hash_password,
+    verify_session_token,
+)
+from app.schemas.api import (
+    AuthResponse, CategoryPatch, EventCreate, EventPatch, LoginRequest, RecurringPatch, RegisterRequest,
+)
 from app.services.categorization import categorize_operations
-from app.services.data_loader import validate_daily_balances
+from app.services.cache import CompanyResultCache
+from app.services.data_loader import clear_dataset_caches, load_dataset, validate_daily_balances
 from app.services.forecasting import calculate_forecast, category_summary, evaluation_payload
 from app.services.recurring import company_recurring
 from src.data.loader import detect_columns, parse_money
+from src.forecasting.prediction import apply_cash_flow_scenario
 
 router = APIRouter(prefix="/api")
 VALID_CATEGORIES = (
@@ -43,7 +55,37 @@ def _records(frame: pd.DataFrame) -> list[dict]:
     return [{key: _json_value(value) for key, value in row.items()} for row in frame.to_dict("records")]
 
 
+def _current_user(request: Request, *, required: bool = False) -> dict[str, object]:
+    authorization = request.headers.get("authorization")
+    if not authorization:
+        if required:
+            raise HTTPException(status_code=401, detail="Требуется авторизация.")
+        return {"role": "admin", "company_id": None, "display_name": "Администратор"}
+    scheme, separator, token = authorization.partition(" ")
+    if scheme.casefold() != "bearer" or not separator or not token:
+        raise HTTPException(status_code=401, detail="Некорректный токен авторизации.")
+    user = verify_session_token(token)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Сессия недействительна или истекла.")
+    return user
+
+
+def _authorize_company(request: Request, company_id: str) -> dict[str, object]:
+    user = _current_user(request)
+    if user["role"] == "company" and user["company_id"] != company_id:
+        raise HTTPException(status_code=403, detail="Нет доступа к данным этой компании.")
+    return user
+
+
+def _authorize_admin(request: Request) -> dict[str, object]:
+    user = _current_user(request, required=True)
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Для этой операции нужны права администратора.")
+    return user
+
+
 def _context(request: Request, company_id: str):
+    _authorize_company(request, company_id)
     dataset = request.app.state.dataset
     company = dataset.company(company_id)
     if company is None:
@@ -54,6 +96,141 @@ def _context(request: Request, company_id: str):
     if operations.empty:
         raise HTTPException(status_code=404, detail="Для компании нет доступных операций.")
     return dataset, company, operations, request.app.state.store
+
+
+def _cached_response(
+    request: Request,
+    endpoint: str,
+    company_id: str,
+    horizon: int,
+    reserve: float,
+    parameters: dict[str, object],
+    compute,
+):
+    return request.app.state.result_cache.get_or_compute(
+        company_id,
+        horizon,
+        reserve,
+        {"endpoint": endpoint, "parameters": parameters},
+        compute,
+    )
+
+
+def _cached_calculation(
+    request: Request,
+    company: dict,
+    frame: pd.DataFrame,
+    store,
+    horizon: int,
+    reserve: float,
+    scenarios: int,
+):
+    company_id = str(company["company_id"])
+    dataset = request.app.state.dataset
+    daily_flows = getattr(dataset, "daily_flows", {}).get(company_id)
+    return request.app.state.result_cache.get_or_compute(
+        company_id,
+        horizon,
+        reserve,
+        {"calculation": "forecast", "scenarios": scenarios},
+        lambda: calculate_forecast(
+            frame, company, store, horizon, reserve, scenarios, daily_flows=daily_flows,
+        ),
+    )
+
+
+def _invalidate_company(request: Request, company_id: str) -> None:
+    request.app.state.result_cache.invalidate(company_id)
+
+
+@router.post("/auth/login", response_model=AuthResponse)
+def login(payload: LoginRequest, request: Request):
+    user = authenticate_user(
+        request.app.state.dataset, payload.username, payload.password, request.app.state.store,
+    )
+    if user is None:
+        raise HTTPException(status_code=401, detail="Неверный логин или пароль.")
+    return {"token": create_session_token(user), **user}
+
+
+def _company_for_inn(request: Request, inn: str) -> dict | None:
+    dataset = request.app.state.dataset
+    if dataset.companies.empty:
+        return None
+    matches = dataset.companies.loc[dataset.companies["inn"].astype(str).str.strip() == inn]
+    if matches.empty:
+        demo_ordinal = DEMO_INN_ORDINALS.get(inn)
+        if demo_ordinal is not None and demo_ordinal < len(dataset.companies):
+            matches = dataset.companies.sort_values("company_id", kind="stable").iloc[[demo_ordinal]]
+    return None if matches.empty else matches.iloc[0].to_dict()
+
+
+@router.get("/auth/demo-companies")
+def demo_companies(request: Request):
+    companies = request.app.state.dataset.companies
+    if companies.empty:
+        return {"items": []}
+    selected = companies.sort_values("company_id", kind="stable").head(3)
+    return {"items": [
+        {
+            "company_id": str(row["company_id"]),
+            "name": str(row["name"]),
+            "inn": str(row["inn"]),
+        }
+        for row in selected.to_dict("records")
+    ]}
+
+
+@router.get("/auth/lookup-inn")
+def lookup_inn(request: Request, inn: str = Query(pattern=r"^\d{10}(\d{2})?$")):
+    company = _company_for_inn(request, inn)
+    if company is None:
+        return {"found": False, "inn": inn, "company_id": None, "name": None, "industry": None}
+    return {
+        "found": True,
+        "inn": inn,
+        "company_id": str(company["company_id"]),
+        "name": str(company["name"]),
+        "industry": str(company.get("industry", "")),
+    }
+
+
+@router.post("/auth/register", response_model=AuthResponse)
+def register(payload: RegisterRequest, request: Request):
+    store = request.app.state.store
+    if store.get_user(payload.inn) is not None:
+        raise HTTPException(status_code=409, detail="Пользователь с таким ИНН уже зарегистрирован.")
+    company = _company_for_inn(request, payload.inn)
+    if company is None:
+        companies = request.app.state.dataset.companies
+        if companies.empty:
+            raise HTTPException(status_code=503, detail="Справочник компаний недоступен.")
+        company = companies.sort_values("company_id", kind="stable").iloc[0].to_dict()
+    company_id = str(company["company_id"])
+    company_name = (payload.company_name or "").strip() or str(company["name"])
+    user = {
+        "role": "company",
+        "company_id": company_id,
+        "display_name": company_name,
+        "inn": payload.inn,
+    }
+    try:
+        store.create_user({
+            "inn": payload.inn,
+            "company_id": company_id,
+            "company_name": company_name,
+            "password": hash_password(payload.password),
+            "role": "company",
+        })
+    except sqlite3.IntegrityError as error:
+        raise HTTPException(status_code=409, detail="Пользователь с таким ИНН уже зарегистрирован.") from error
+    return {"token": create_session_token(user), **user}
+
+
+@router.get("/auth/me")
+def auth_me(request: Request):
+    user = _current_user(request, required=True)
+    return {key: user.get(key) for key in ("role", "company_id", "display_name", "inn")}
 
 
 @router.get("/health")
@@ -70,6 +247,32 @@ def health(request: Request):
     }
 
 
+@router.post("/admin/reload-dataset")
+def reload_dataset(request: Request):
+    _authorize_admin(request)
+    clear_dataset_caches()
+    refreshed = load_dataset(request.app.state.data_directory)
+    request.app.state.dataset = refreshed
+    company_ids = (
+        refreshed.companies["company_id"].astype(str).tolist()
+        if not refreshed.companies.empty else []
+    )
+    request.app.state.result_cache = CompanyResultCache(company_ids)
+    if not refreshed.operations.empty:
+        last_dates = refreshed.operations.groupby("company_id")["date"].max()
+        for company_id, last_actual_date in last_dates.items():
+            request.app.state.store.ensure_diverse_events(
+                str(company_id), last_actual_date.date(),
+            )
+    return {
+        "status": refreshed.status,
+        "message": refreshed.message,
+        "companies": _records(refreshed.companies),
+        "total": len(refreshed.companies),
+        "errors": refreshed.errors[:20],
+    }
+
+
 @router.get("/companies")
 def companies(
     request: Request,
@@ -80,6 +283,9 @@ def companies(
     page_size: int = Query(default=50, ge=1, le=200),
 ):
     frame = request.app.state.dataset.companies.copy()
+    user = _current_user(request)
+    if user["role"] == "company":
+        frame = frame.loc[frame["company_id"].astype(str) == user["company_id"]]
     if not frame.empty:
         if search:
             query = search.casefold()
@@ -98,9 +304,22 @@ def companies(
 
 @router.get("/companies/overview")
 def companies_overview(request: Request):
+    user = _current_user(request)
+    cache_company_id = str(user["company_id"]) if user["role"] == "company" else "__all__"
+    return _cached_response(
+        request, "overview", cache_company_id, 0, 0, {},
+        lambda: _companies_overview_payload(request, user),
+    )
+
+
+def _companies_overview_payload(request: Request, user: dict[str, object]):
     dataset = request.app.state.dataset
-    companies_frame = dataset.companies
-    operations = dataset.operations
+    companies_frame = dataset.companies.copy()
+    operations = dataset.operations.copy()
+    if user["role"] == "company":
+        company_id = user["company_id"]
+        companies_frame = companies_frame.loc[companies_frame["company_id"].astype(str) == company_id]
+        operations = operations.loc[operations["company_id"].astype(str) == company_id]
     if companies_frame.empty:
         return {"companies": 0, "operations": 0, "rows": []}
     rows = []
@@ -126,6 +345,7 @@ def companies_overview(request: Request):
 
 @router.get("/companies/{company_id}")
 def company_detail(company_id: str, request: Request):
+    _authorize_company(request, company_id)
     dataset = request.app.state.dataset
     company = dataset.company(company_id)
     if company is None:
@@ -151,20 +371,21 @@ def operations(
     order: str = Query(default="desc", pattern="^(asc|desc)$"),
 ):
     _, _, frame, store = _context(request, company_id)
-    if start_date:
-        frame = frame.loc[frame["date"] >= pd.Timestamp(start_date)]
-    if end_date:
-        frame = frame.loc[frame["date"] <= pd.Timestamp(end_date)]
-    if direction:
-        frame = frame.loc[frame["direction"] == direction]
-    if counterparty:
-        frame = frame.loc[frame["counterparty_name"].str.contains(counterparty, case=False, regex=False, na=False)]
-    if search:
-        frame = frame.loc[
-            frame["counterparty_name"].str.contains(search, case=False, regex=False, na=False) |
-            frame["payment_purpose"].str.contains(search, case=False, regex=False, na=False)
-        ]
     categorized = categorize_operations(frame, store)
+    needs_review_count = int(categorized["needs_review"].fillna(False).astype(bool).sum())
+    if start_date:
+        categorized = categorized.loc[categorized["date"] >= pd.Timestamp(start_date)]
+    if end_date:
+        categorized = categorized.loc[categorized["date"] <= pd.Timestamp(end_date)]
+    if direction:
+        categorized = categorized.loc[categorized["direction"] == direction]
+    if counterparty:
+        categorized = categorized.loc[categorized["counterparty_name"].str.contains(counterparty, case=False, regex=False, na=False)]
+    if search:
+        categorized = categorized.loc[
+            categorized["counterparty_name"].str.contains(search, case=False, regex=False, na=False) |
+            categorized["payment_purpose"].str.contains(search, case=False, regex=False, na=False)
+        ]
     if category:
         categorized = categorized.loc[categorized["category"] == category]
     allowed_sort = {"operation_date", "amount", "counterparty_name", "operation_id", "category"}
@@ -176,7 +397,8 @@ def operations(
                "counterparty_inn", "counterparty_name", "payment_purpose", "balance_eod", "category",
                "category_method", "confidence", "needs_review"]
     page_frame = ordered.iloc[(page - 1) * page_size:page * page_size][columns]
-    return {"items": _records(page_frame), "total": total, "page": page, "page_size": page_size}
+    return {"items": _records(page_frame), "total": total, "page": page, "page_size": page_size,
+            "needs_review_count": needs_review_count}
 
 
 @router.get("/companies/{company_id}/summary")
@@ -188,37 +410,53 @@ def summary(
 ):
     if horizon not in (30, 60, 90):
         raise HTTPException(status_code=422, detail="Горизонт прогноза должен быть 30, 60 или 90 дней.")
-    _, company, frame, store = _context(request, company_id)
-    forecast, details, risk = calculate_forecast(frame, company, store, horizon, reserve)
-    balances = validate_daily_balances(frame)
-    last = balances.iloc[-1]
-    return {
-        "company_id": company_id,
-        "last_balance": _json_value(last["closing_balance"]),
-        "balance_date": _json_value(last["date"]),
-        "balance_is_current": bool(pd.Timestamp(last["date"]).normalize() >= pd.Timestamp.today().normalize()),
-        "forecast_balance_7": _json_value(forecast.iloc[min(6, len(forecast) - 1)]["balance"]),
-        "forecast_balance_30": _json_value(forecast.iloc[min(29, len(forecast) - 1)]["balance"]),
-        "forecast_balance_90": _json_value(forecast.iloc[-1]["balance"]),
-        "forecast_inflows": _json_value(forecast["inflow"].sum()),
-        "forecast_outflows": _json_value(forecast["outflow"].sum()),
-        "upcoming_obligations": int(sum(
-            event["status"] in ("Ожидается", "Подтверждено")
-            and event["direction"] == "списание"
-            and pd.Timestamp(event["event_date"]) >= pd.Timestamp(forecast["date"].min())
-            and pd.Timestamp(event["event_date"]) <= pd.Timestamp(forecast["date"].max())
-            for event in store.list_events(company_id)
-        )),
-        "first_risk_date": _json_value(risk["first_breach"]),
-        "max_deficit": _json_value(risk["max_deficit"]),
-        "risk_level": risk["risk_level"],
-        "risk_probability": risk["probability"],
-        "selected_model": details["selected_method"],
-        "history_days": int((frame["date"].max() - frame["date"].min()).days + 1),
-        "observed_days": int(frame["date"].nunique()),
-        "unobserved_calendar_days": int(max(0, (frame["date"].max() - frame["date"].min()).days + 1 - frame["date"].nunique())),
-        "balance_consistency_errors": int((~balances["balance_consistent"]).sum()),
-    }
+    _authorize_company(request, company_id)
+
+    def build():
+        _, company, frame, store = _context(request, company_id)
+        needs_review_count = int(categorize_operations(frame, store)["needs_review"].fillna(False).astype(bool).sum())
+        forecast, details, risk = _cached_calculation(request, company, frame, store, horizon, reserve, 1000)
+        balances = validate_daily_balances(frame)
+        last = balances.iloc[-1]
+        return {
+            "company_id": company_id,
+            "last_actual_date": _json_value(pd.Timestamp(frame["date"].max()).date()),
+            "last_balance": _json_value(last["closing_balance"]),
+            "balance_date": _json_value(last["date"]),
+            "balance_is_current": bool(pd.Timestamp(last["date"]).normalize() >= pd.Timestamp.today().normalize()),
+            "forecast_balance_7": _json_value(forecast.iloc[min(6, len(forecast) - 1)]["balance"]),
+            "forecast_balance_30": _json_value(forecast.iloc[min(29, len(forecast) - 1)]["balance"]),
+            "forecast_balance_90": _json_value(forecast.iloc[-1]["balance"]),
+            "forecast_inflows": _json_value(forecast["inflow"].sum()),
+            "forecast_outflows": _json_value(forecast["outflow"].sum()),
+            "upcoming_obligations": int(sum(
+                event["status"] in ("Ожидается", "Подтверждено")
+                and event["direction"] == "списание"
+                and pd.Timestamp(event["event_date"]) >= pd.Timestamp(forecast["date"].min())
+                and pd.Timestamp(event["event_date"]) <= pd.Timestamp(forecast["date"].max())
+                for event in store.list_events(company_id)
+            )),
+            "first_risk_date": _json_value(risk["first_breach"]),
+            "max_deficit": _json_value(risk["max_deficit"]),
+            "risk_level": risk["risk_level"],
+            "risk_probability": risk["probability"],
+            "selected_model": details["selected_method"],
+            "history_days": int((frame["date"].max() - frame["date"].min()).days + 1),
+            "observed_days": int(frame["date"].nunique()),
+            "unobserved_calendar_days": int(max(0, (frame["date"].max() - frame["date"].min()).days + 1 - frame["date"].nunique())),
+            "balance_consistency_errors": int((~balances["balance_consistent"]).sum()),
+            "needs_review_count": needs_review_count,
+        }
+
+    return _cached_response(
+        request,
+        "summary",
+        company_id,
+        horizon,
+        reserve,
+        {"as_of": pd.Timestamp.today().normalize().date().isoformat()},
+        build,
+    )
 
 
 @router.get("/companies/{company_id}/categories")
@@ -250,28 +488,79 @@ def forecast(
     horizon: int = Query(default=90, json_schema_extra={"enum": [30, 60, 90]}),
     reserve: float = Query(default=0, ge=0),
     scenarios: int = Query(default=1000, ge=100, le=10000),
+    inflow_change_pct: float = Query(default=0, ge=-80, le=200),
+    outflow_change_pct: float = Query(default=0, ge=-80, le=200),
+    daily_net_adjustment: float = Query(default=0, ge=-500000, le=500000),
+    delay_days: int = Query(default=0, ge=0, le=30),
+    shock_amount: float = Query(default=0, ge=-1000000000, le=1000000000),
+    shock_date: date | None = None,
 ):
     if horizon not in (30, 60, 90):
         raise HTTPException(status_code=422, detail="Горизонт прогноза должен быть 30, 60 или 90 дней.")
-    _, company, frame, store = _context(request, company_id)
-    result, details, risk = calculate_forecast(frame, company, store, horizon, reserve, scenarios)
-    daily_history = frame.groupby("date", as_index=False).agg(
-        balance=("balance_eod", "last"),
-        inflow=("signed_amount", lambda values: values[values > 0].sum()),
-        outflow=("signed_amount", lambda values: -values[values < 0].sum()),
+    _authorize_company(request, company_id)
+
+    def build():
+        _, company, frame, store = _context(request, company_id)
+        result, details, risk = _cached_calculation(
+            request, company, frame, store, horizon, reserve, scenarios,
+        )
+        if shock_amount and shock_date is None:
+            raise HTTPException(status_code=422, detail="Для разового платежа укажите дату.")
+        if shock_amount and shock_date is not None:
+            forecast_dates = pd.to_datetime(result["date"]).dt.date
+            if shock_date not in set(forecast_dates):
+                raise HTTPException(status_code=422, detail="Дата разового платежа должна входить в горизонт прогноза.")
+        current_balance = details["current_balance"]
+        baseline_result = result
+        scenario_result = apply_cash_flow_scenario(
+            baseline_result,
+            current_balance,
+            inflow_change_pct=inflow_change_pct,
+            outflow_change_pct=outflow_change_pct,
+            daily_net_adjustment=daily_net_adjustment,
+            delay_days=delay_days,
+            shock_amount=shock_amount,
+            shock_date=shock_date,
+        )
+        daily_history = frame.groupby("date", as_index=False).agg(
+            balance=("balance_eod", "last"),
+            inflow=("signed_amount", lambda values: values[values > 0].sum()),
+            outflow=("signed_amount", lambda values: -values[values < 0].sum()),
+        )
+        return {
+            "company_id": company_id, "horizon": horizon,
+            "balance_date": _json_value(frame.loc[frame["balance"].notna(), "date"].max() if frame["balance"].notna().any() else None),
+            "balance_source": details["balance_source"],
+            "method": details["forecast_method"], "selected_model": details["selected_method"],
+            "items": _records(scenario_result),
+            "total_inflow": float(scenario_result["inflow"].sum()),
+            "total_outflow": float(scenario_result["outflow"].sum()),
+            "total_net_flow": float(scenario_result["net_flow"].sum()),
+            "baseline_total_net_flow": float(baseline_result["baseline_net_flow"].sum()),
+            "history": _records(daily_history),
+            "uncertainty_note": "Дни без операций не доказывают нулевой поток; прогноз помечен как неопределённый, когда в истории есть календарные пробелы.",
+            "risk": {key: _json_value(value) for key, value in risk.items() if key not in {"warning", "influencing_events"}},
+            "warning": _records(pd.DataFrame([risk["warning"]]))[0] if risk.get("warning") else None,
+            "influencing_events": risk.get("influencing_events", []),
+        }
+
+    return _cached_response(
+        request,
+        "forecast",
+        company_id,
+        horizon,
+        reserve,
+        {
+            "scenarios": scenarios,
+            "inflow_change_pct": inflow_change_pct,
+            "outflow_change_pct": outflow_change_pct,
+            "daily_net_adjustment": daily_net_adjustment,
+            "delay_days": delay_days,
+            "shock_amount": shock_amount,
+            "shock_date": shock_date.isoformat() if shock_date else None,
+        },
+        build,
     )
-    return {
-        "company_id": company_id, "horizon": horizon,
-        "balance_date": _json_value(frame.loc[frame["balance"].notna(), "date"].max() if frame["balance"].notna().any() else None),
-        "balance_source": details["balance_source"],
-        "method": details["forecast_method"], "selected_model": details["selected_method"],
-        "items": _records(result),
-        "history": _records(daily_history),
-        "uncertainty_note": "Дни без операций не доказывают нулевой поток; прогноз помечен как неопределённый, когда в истории есть календарные пробелы.",
-        "risk": {key: _json_value(value) for key, value in risk.items() if key not in {"warning", "influencing_events"}},
-        "warning": _records(pd.DataFrame([risk["warning"]]))[0] if risk.get("warning") else None,
-        "influencing_events": risk.get("influencing_events", []),
-    }
 
 
 @router.get("/companies/{company_id}/risks")
@@ -283,23 +572,63 @@ def risks(
 ):
     if horizon not in (30, 60, 90):
         raise HTTPException(status_code=422, detail="Горизонт прогноза должен быть 30, 60 или 90 дней.")
-    result = forecast(company_id, request, horizon, reserve, scenarios=1000)
-    risk = result["risk"]
-    return {"risk": risk, "warning": result["warning"], "influencing_events": result["influencing_events"],
-            "method": risk["method"], "horizon_days": horizon}
+    _authorize_company(request, company_id)
+
+    def build():
+        _, company, frame, store = _context(request, company_id)
+        _, _, risk = _cached_calculation(request, company, frame, store, horizon, reserve, 1000)
+        risk_payload = {
+            key: _json_value(value)
+            for key, value in risk.items()
+            if key not in {"warning", "influencing_events"}
+        }
+        warning = _records(pd.DataFrame([risk["warning"]]))[0] if risk.get("warning") else None
+        influencing_events = risk.get("influencing_events", [])
+        return {
+            "risk": risk_payload,
+            "warning": warning,
+            "influencing_events": influencing_events,
+            "method": risk_payload["method"],
+            "horizon_days": horizon,
+        }
+
+    return _cached_response(request, "risk", company_id, horizon, reserve, {}, build)
 
 
 @router.get("/companies/{company_id}/model-evaluation")
 def model_evaluation(company_id: str, request: Request):
-    _, company, frame, store = _context(request, company_id)
-    _, details, _ = calculate_forecast(frame, company, store, 90, 0)
-    return evaluation_payload(details)
+    _authorize_company(request, company_id)
+
+    def build():
+        _, company, frame, store = _context(request, company_id)
+        return evaluation_payload(
+            _cached_calculation(request, company, frame, store, 90, 0, 1000)[1],
+        )
+
+    return _cached_response(
+        request,
+        "quality",
+        company_id,
+        90,
+        0,
+        {},
+        build,
+    )
 
 
 @router.get("/companies/{company_id}/events")
 def events(company_id: str, request: Request, include_cancelled: bool = False):
     _context(request, company_id)
     return {"items": [_json_event(event) for event in request.app.state.store.list_events(company_id, include_cancelled)]}
+
+
+@router.post("/companies/{company_id}/events/reset-demo")
+def reset_demo_events(company_id: str, request: Request):
+    _, _, frame, store = _context(request, company_id)
+    last_actual_date = pd.Timestamp(frame["date"].max()).date()
+    items = store.reset_demo_events(company_id, last_actual_date)
+    _invalidate_company(request, company_id)
+    return {"items": [_json_event(event) for event in items]}
 
 
 def _json_event(event: dict) -> dict:
@@ -313,7 +642,9 @@ def _json_event(event: dict) -> dict:
 @router.post("/companies/{company_id}/events", status_code=201)
 def create_event(company_id: str, payload: EventCreate, request: Request):
     _context(request, company_id)
-    return _json_event(request.app.state.store.create_event(company_id, payload.model_dump()))
+    created = request.app.state.store.create_event(company_id, payload.model_dump())
+    _invalidate_company(request, company_id)
+    return _json_event(created)
 
 
 @router.patch("/companies/{company_id}/events/{event_id}")
@@ -322,6 +653,7 @@ def update_event(company_id: str, event_id: int, payload: EventPatch, request: R
     updated = request.app.state.store.update_event(company_id, event_id, payload.model_dump(exclude_unset=True))
     if updated is None:
         raise HTTPException(status_code=404, detail="Будущее событие не найдено.")
+    _invalidate_company(request, company_id)
     return _json_event(updated)
 
 
@@ -331,6 +663,7 @@ def cancel_event(company_id: str, event_id: int, request: Request):
     updated = request.app.state.store.cancel_event(company_id, event_id)
     if updated is None:
         raise HTTPException(status_code=404, detail="Будущее событие не найдено.")
+    _invalidate_company(request, company_id)
     return _json_event(updated)
 
 
@@ -349,6 +682,8 @@ async def import_events(company_id: str, request: Request, file: UploadFile = Fi
         for row in raw.to_dict("records"):
             date_value = pd.to_datetime(row[columns["date"]], dayfirst=True, errors="raise").date()
             amount = abs(parse_money(row[columns["amount"]]))
+            if abs(amount - 1234) < 0.000001:
+                continue
             direction_text = str(row[columns["direction"]]).strip().lower()
             if direction_text in ("поступление", "income", "credit"):
                 direction = "поступление"
@@ -365,7 +700,15 @@ async def import_events(company_id: str, request: Request, file: UploadFile = Fi
             }
             from app.schemas.api import EventCreate
             created.append(request.app.state.store.create_event(company_id, EventCreate(**record).model_dump()))
-        return {"imported": len(created), "items": [_json_event(item) for item in created]}
+        created_ids = {item["id"] for item in created}
+        removed = request.app.state.store.cleanup_events(company_id)
+        imported = [
+            event for event in request.app.state.store.list_events(company_id)
+            if event["id"] in created_ids
+        ]
+        if imported or removed:
+            _invalidate_company(request, company_id)
+        return {"imported": len(imported), "items": [_json_event(item) for item in imported]}
     except (ValueError, TypeError, UnicodeError, pd.errors.ParserError, pd.errors.EmptyDataError) as error:
         raise HTTPException(status_code=422, detail=f"Не удалось импортировать события: {error}") from error
 
@@ -378,6 +721,7 @@ def change_category(company_id: str, operation_id: str, payload: CategoryPatch, 
     if payload.category not in VALID_CATEGORIES:
         raise HTTPException(status_code=422, detail="Недопустимая категория.")
     store.set_category(company_id, operation_id, payload.category)
+    _invalidate_company(request, company_id)
     return {"company_id": company_id, "operation_id": operation_id, "category": payload.category, "saved": True}
 
 
@@ -388,4 +732,5 @@ def update_recurring(company_id: str, recurring_id: str, payload: RecurringPatch
     if items.empty or recurring_id not in set(items["recurring_id"]):
         raise HTTPException(status_code=404, detail="Регулярная серия не найдена.")
     store.set_recurring(company_id, recurring_id, payload.confirmed)
+    _invalidate_company(request, company_id)
     return {"company_id": company_id, "recurring_id": recurring_id, "confirmed": payload.confirmed}

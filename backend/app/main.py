@@ -16,6 +16,7 @@ from app.api.routes.api import router
 from app.core.config import DATA_DIR, FRONTEND_ORIGINS
 from app.core.storage import SQLiteStore
 from app.services.data_loader import load_dataset
+from app.services.cache import CompanyResultCache
 
 LOGGER = logging.getLogger(__name__)
 
@@ -26,6 +27,19 @@ async def lifespan(application: FastAPI):
     application.state.dataset = load_dataset(DATA_DIR)
     application.state.data_directory = DATA_DIR
     application.state.store = SQLiteStore()
+    application.state.store.cleanup_events()
+    dataset = application.state.dataset
+    if not dataset.operations.empty:
+        last_dates = dataset.operations.groupby("company_id")["date"].max()
+        for company_id, last_actual_date in last_dates.items():
+            application.state.store.ensure_diverse_events(
+                str(company_id),
+                last_actual_date.date(),
+            )
+    application.state.result_cache = CompanyResultCache(
+        application.state.dataset.companies["company_id"].astype(str).tolist()
+        if not application.state.dataset.companies.empty else []
+    )
     LOGGER.info("%s", application.state.dataset.message)
     yield
 
@@ -41,6 +55,6 @@ app.add_middleware(
     allow_origins=FRONTEND_ORIGINS,
     allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 app.include_router(router)

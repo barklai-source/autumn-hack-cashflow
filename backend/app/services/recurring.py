@@ -20,5 +20,11 @@ def company_recurring(operations: pd.DataFrame, store: SQLiteStore) -> pd.DataFr
         lambda value: hashlib.sha256(f"{company_id}|{value}".encode("utf-8")).hexdigest()[:20]
     )
     confirmations = store.recurring_confirmation(company_id)
-    result["confirmed"] = result["recurring_id"].map(lambda key: confirmations.get(key, False)).astype(bool)
+    result["confirmed"] = result.apply(
+        lambda row: confirmations.get(
+            row["recurring_id"],
+            float(row["confidence"]) >= 0.75,
+        ),
+        axis=1,
+    ).astype(bool)
     return result

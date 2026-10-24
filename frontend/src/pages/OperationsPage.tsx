@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Search, SlidersHorizontal } from 'lucide-react'
+import { Search, SlidersHorizontal, TriangleAlert } from 'lucide-react'
+import { useSearchParams } from 'react-router-dom'
 import { api } from '../api/client'
 import { QueryState, EmptyState } from '../components/State'
 import { useCompanyContext } from '../components/CompanyContext'
@@ -12,10 +13,11 @@ const CATEGORIES = ['Выручка и поступления от клиент�
 export function OperationsPage() {
   const { company } = useCompanyContext()
   const queryClient = useQueryClient()
+  const [searchParams, setSearchParams] = useSearchParams()
   const [page, setPage] = useState(1)
   const [search, setSearch] = useState('')
   const [direction, setDirection] = useState('')
-  const [category, setCategory] = useState('')
+  const [category, setCategory] = useState(() => searchParams.get('category') ?? '')
   const [counterparty, setCounterparty] = useState('')
   const [startDate, setStartDate] = useState('')
   const [endDate, setEndDate] = useState('')
@@ -31,17 +33,32 @@ export function OperationsPage() {
   const result = useQuery({ queryKey: keys.operations(company?.company_id ?? '', queryKey), queryFn: () => api.operations(company!.company_id, params) })
   const categoryChange = useMutation({
     mutationFn: ({ operationId, value }: { operationId: string; value: string }) => api.changeCategory(company!.company_id, operationId, value),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['operations', company?.company_id] }),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['operations', company?.company_id] }),
+        queryClient.invalidateQueries({ queryKey: ['summary', company?.company_id] }),
+        queryClient.invalidateQueries({ queryKey: ['categories', company?.company_id] }),
+        queryClient.invalidateQueries({ queryKey: ['recurring', company?.company_id] }),
+      ])
+    },
   })
   const pageCount = Math.ceil((result.data?.total ?? 0) / 30)
   const setFilter = (action: () => void) => { action(); setPage(1) }
+  const selectCategory = (value: string) => {
+    setCategory(value)
+    const next = new URLSearchParams(searchParams)
+    if (value) next.set('category', value)
+    else next.delete('category')
+    setSearchParams(next, { replace: true })
+  }
   return <div className="page-stack">
     <div className="page-heading"><div><div className="eyebrow">ИСТОРИЯ КОМПАНИИ</div><h1>Операции</h1><p>Постраничная загрузка с сервера. Корректировки категорий сохраняются в SQLite.</p></div><span className="tag">{result.data?.total.toLocaleString('ru-RU') ?? '…'} операций</span></div>
     <section className="card">
+      {(result.data?.needs_review_count ?? 0) > 0 && <div className="notice"><TriangleAlert size={17} /> <span>Есть операции, требующие ручной проверки.</span><button className="button secondary" onClick={() => { selectCategory('Требует проверки'); setPage(1) }}>Показать требующие проверки ({result.data?.needs_review_count})</button></div>}
       <div className="operation-filters">
         <label className="search-box"><Search size={17} /><input placeholder="Поиск: контрагент или назначение" value={search} onChange={(event) => setFilter(() => setSearch(event.target.value))} /></label>
         <label><SlidersHorizontal size={15} /><select aria-label="Направление" value={direction} onChange={(event) => setFilter(() => setDirection(event.target.value))}><option value="">Все направления</option><option value="поступление">Поступления</option><option value="списание">Списания</option></select></label>
-        <label><select aria-label="Категория" value={category} onChange={(event) => setFilter(() => setCategory(event.target.value))}><option value="">Все категории</option>{CATEGORIES.map((item) => <option key={item}>{item}</option>)}</select></label>
+        <label><select aria-label="Категория" value={category} onChange={(event) => setFilter(() => selectCategory(event.target.value))}><option value="">Все категории</option>{CATEGORIES.map((item) => <option key={item}>{item}</option>)}</select></label>
         <input aria-label="Контрагент" placeholder="Контрагент" value={counterparty} onChange={(event) => setFilter(() => setCounterparty(event.target.value))} />
         <input aria-label="Дата с" type="date" value={startDate} onChange={(event) => setFilter(() => setStartDate(event.target.value))} />
         <input aria-label="Дата по" type="date" value={endDate} onChange={(event) => setFilter(() => setEndDate(event.target.value))} />

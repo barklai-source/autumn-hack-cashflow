@@ -12,6 +12,24 @@ export type Company = {
 }
 
 export type Page<T> = { items: T[]; total: number; page: number; page_size: number }
+export type OperationsResponse = Page<Operation> & { needs_review_count?: number }
+
+export type AuthSession = {
+  token: string
+  role: 'admin' | 'company'
+  company_id: string | null
+  display_name: string
+  inn: string | null
+}
+
+export type AuthUser = Omit<AuthSession, 'token'>
+export type InnLookup = {
+  found: boolean
+  inn: string
+  company_id: string | null
+  name: string | null
+  industry: string | null
+}
 
 export type Operation = {
   operation_id: string
@@ -32,6 +50,7 @@ export type Operation = {
 
 export type Summary = {
   company_id: string
+  last_actual_date: string | null
   last_balance: number | null
   balance_date: string | null
   balance_is_current: boolean
@@ -50,6 +69,7 @@ export type Summary = {
   observed_days: number
   unobserved_calendar_days: number
   balance_consistency_errors: number
+  needs_review_count?: number
 }
 
 export type ForecastPoint = {
@@ -57,6 +77,10 @@ export type ForecastPoint = {
   inflow: number
   outflow: number
   net_flow: number
+  baseline_inflow: number
+  baseline_outflow: number
+  baseline_net_flow: number
+  baseline_balance: number | null
   event_flow: number
   forecast_net: number
   balance: number | null
@@ -72,6 +96,10 @@ export type ForecastResult = {
   balance_source: string
   method: string
   selected_model: string
+  total_inflow: number
+  total_outflow: number
+  total_net_flow: number
+  baseline_total_net_flow: number
   items: ForecastPoint[]
   history: { date: string; balance: number; inflow: number; outflow: number }[]
   uncertainty_note: string
@@ -90,6 +118,14 @@ export type ForecastResult = {
     reasons: string
     action: string
   } | null
+}
+
+export type RisksResult = {
+  risk: Record<string, unknown>
+  warning: ForecastResult['warning']
+  influencing_events: { date: string; amount: number; description: string }[]
+  method: string
+  horizon_days: number
 }
 
 export type EventItem = {

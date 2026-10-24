@@ -6,6 +6,25 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=200)
+    password: str = Field(min_length=1, max_length=200)
+
+
+class RegisterRequest(BaseModel):
+    inn: str = Field(pattern=r"^\d{10}(\d{2})?$")
+    password: str = Field(min_length=1, max_length=200)
+    company_name: str | None = Field(default=None, max_length=200)
+
+
+class AuthResponse(BaseModel):
+    token: str
+    role: Literal["admin", "company"]
+    company_id: str | None
+    display_name: str
+    inn: str | None = None
+
+
 class EventCreate(BaseModel):
     date: Date
     amount: float = Field(gt=0)

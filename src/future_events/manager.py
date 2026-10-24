@@ -61,7 +61,13 @@ def merge_future_flows(
 ) -> pd.DataFrame:
     """Combine explicit and confirmed recurring events without duplicate flows."""
     dates = pd.date_range(start_date + pd.Timedelta(days=1), periods=horizon_days, freq="D")
-    result = pd.DataFrame({"date": dates, "event_flow": 0.0, "event_count": 0})
+    result = pd.DataFrame({
+        "date": dates,
+        "event_flow": 0.0,
+        "event_inflow": 0.0,
+        "event_outflow": 0.0,
+        "event_count": 0,
+    })
     accepted_events = pd.DataFrame(columns=EVENT_COLUMNS) if events is None else events.copy()
     if not accepted_events.empty:
         accepted_events = accepted_events.loc[accepted_events["status"].isin(["ожидается", "подтверждено"])]
@@ -75,8 +81,11 @@ def merge_future_flows(
             covered.add(key)
             mask = result["date"].eq(date)
             result.loc[mask, "event_flow"] += float(row["amount"])
+            result.loc[mask, "event_inflow"] += max(float(row["amount"]), 0.0)
+            result.loc[mask, "event_outflow"] += max(-float(row["amount"]), 0.0)
             result.loc[mask, "event_count"] += 1
     if recurring is not None and not recurring.empty:
+        scheduled = set()
         for row in recurring.to_dict("records"):
             if not bool(row.get("confirmed", False)) or not bool(row.get("accepted", True)):
                 continue
@@ -86,9 +95,11 @@ def merge_future_flows(
             next_date = pd.Timestamp(row["next_date"]).normalize()
             while next_date <= dates[-1]:
                 key = (next_date, round(float(row["amount"]), 2), str(row.get("account", "")))
-                if next_date in set(dates) and key not in covered:
+                if next_date in set(dates) and key not in covered and key not in scheduled:
                     mask = result["date"].eq(next_date)
                     result.loc[mask, "event_flow"] += float(row["amount"])
+                    result.loc[mask, "event_inflow"] += max(float(row["amount"]), 0.0)
+                    result.loc[mask, "event_outflow"] += max(-float(row["amount"]), 0.0)
                     result.loc[mask, "event_count"] += 1
                     scheduled.add(key)
                 next_date += pd.Timedelta(days=interval)

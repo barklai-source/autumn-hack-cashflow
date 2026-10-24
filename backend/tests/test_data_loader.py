@@ -1,6 +1,8 @@
 import pandas as pd
 
+from app.services import data_loader
 from app.services.data_loader import load_dataset, validate_daily_balances
+from app.core.storage import SQLiteStore
 
 
 def test_loads_utf8_bom_semicolon_inns_and_signed_operations(tmp_path):
@@ -24,6 +26,84 @@ def test_loads_utf8_bom_semicolon_inns_and_signed_operations(tmp_path):
     balances = validate_daily_balances(dataset.operations)
     assert balances.iloc[0]["opening_balance"] == 5000
     assert balances.iloc[0]["operations"] == 2
+    assert dataset.daily_flows["C001"]["net_flow"].tolist() == [500]
+
+
+def test_missing_company_inns_receive_deterministic_ten_digit_values(tmp_path):
+    (tmp_path / "companies.csv").write_text(
+        "company_id;name;inn\nC001;Первый;\nC002;Второй;\nC150;Последний;\n",
+        encoding="utf-8-sig",
+    )
+    statements = tmp_path / "statements"
+    statements.mkdir()
+    (statements / "C001.csv").write_text(
+        "operation_id;operation_date;amount;direction;balance_eod\n"
+        "O1;2025-01-01;10;Поступление;10\n",
+        encoding="utf-8-sig",
+    )
+
+    inns = load_dataset(tmp_path).companies.set_index("company_id")["inn"]
+
+    assert inns.to_dict() == {
+        "C001": "7701001001",
+        "C002": "7701002002",
+        "C150": "7701000150",
+    }
+
+
+def test_statement_loader_accepts_arbitrary_company_ids(tmp_path):
+    (tmp_path / "companies.csv").write_text(
+        "company_id;name\nORG-ALPHA;Альфа\n", encoding="utf-8-sig",
+    )
+    statements = tmp_path / "statements"
+    statements.mkdir()
+    (statements / "ORG-ALPHA.csv").write_text(
+        "operation_id;operation_date;amount;direction;balance_eod\n"
+        "O1;2024-03-15;100;Поступление;100\n",
+        encoding="utf-8-sig",
+    )
+
+    dataset = load_dataset(tmp_path)
+
+    assert dataset.companies.iloc[0]["company_id"] == "ORG-ALPHA"
+    assert len(dataset.companies.iloc[0]["inn"]) == 10
+    assert dataset.operations.iloc[0]["company_id"] == "ORG-ALPHA"
+    assert dataset.operations.iloc[0]["date"] == pd.Timestamp("2024-03-15")
+
+
+def test_csv_files_are_parsed_once_until_their_metadata_changes(tmp_path, monkeypatch):
+    (tmp_path / "companies.csv").write_text(
+        "company_id;name\nC001;Test\n", encoding="utf-8-sig",
+    )
+    statements = tmp_path / "statements"
+    statements.mkdir()
+    statement_path = statements / "C001.csv"
+    statement_path.write_text(
+        "operation_id;operation_date;amount;direction;balance_eod\n"
+        "O1;2025-01-01;10;Поступление;20\n",
+        encoding="utf-8-sig",
+    )
+    original_read_csv = pd.read_csv
+    calls = []
+    daily_calls = []
+    original_daily_flows = data_loader._daily_flows
+
+    def counted_read_csv(path, *args, **kwargs):
+        calls.append(str(path))
+        return original_read_csv(path, *args, **kwargs)
+
+    def counted_daily_flows(operations):
+        daily_calls.append(1)
+        return original_daily_flows(operations)
+
+    monkeypatch.setattr(data_loader.pd, "read_csv", counted_read_csv)
+    monkeypatch.setattr(data_loader, "_daily_flows", counted_daily_flows)
+
+    load_dataset(tmp_path)
+    load_dataset(tmp_path)
+
+    assert len(calls) == 2
+    assert len(daily_calls) == 1
 
 
 def test_combined_source_takes_precedence_over_duplicate_individual_files(tmp_path):
@@ -61,3 +141,46 @@ def test_daily_balance_validation_does_not_report_gaps_as_zero_flow_days():
     assert len(result) == 2
     assert result["date"].tolist() == list(pd.to_datetime(["2025-01-01", "2025-01-04"]))
     assert result["balance_consistent"].all()
+
+
+def test_store_indexes_events_and_manual_categories_by_company_and_date(tmp_path):
+    store = SQLiteStore(tmp_path / "indexes.sqlite")
+
+    with store.connection() as connection:
+        event_indexes = {row["name"] for row in connection.execute("PRAGMA index_list(future_events)")}
+        category_indexes = {row["name"] for row in connection.execute("PRAGMA index_list(category_overrides)")}
+
+    assert "idx_events_company_date" in event_indexes
+    assert "idx_category_overrides_company_updated_at" in category_indexes
+
+
+def test_event_cleanup_removes_test_amounts_and_same_company_duplicates(tmp_path):
+    store = SQLiteStore(tmp_path / "event-cleanup.sqlite")
+    event = {
+        "date": pd.Timestamp("2025-02-01").date(), "amount": 1000,
+        "direction": "списание", "category": "Аренда", "event_type": "Счёт",
+        "description": "Аренда помещения", "source": "тест", "status": "Ожидается",
+    }
+    store.create_event("C001", event)
+    store.create_event("C001", event)
+    store.create_event("C002", event)
+    store.create_event("C001", {**event, "amount": 1234})
+
+    deleted = store.cleanup_events()
+
+    assert deleted == 2
+    assert len(store.list_events("C001")) == 1
+    assert len(store.list_events("C002")) == 1
+
+
+def test_demo_events_are_six_unique_entries_after_last_actual_date(tmp_path):
+    store = SQLiteStore(tmp_path / "demo-events.sqlite")
+    last_actual = pd.Timestamp("2025-12-31").date()
+
+    events = store.reset_demo_events("C001", last_actual)
+
+    assert len(events) == 6
+    assert len({event["description"] for event in events}) == 6
+    assert [pd.Timestamp(event["event_date"]).date() - last_actual for event in events] == [
+        pd.Timedelta(days=days) for days in (2, 6, 10, 14, 19, 25)
+    ]

@@ -50,7 +50,7 @@ def detect_recurring(operations: pd.DataFrame, minimum_observations: int = 3) ->
             "next_date": pd.Timestamp(last["date"]) + pd.Timedelta(days=target),
             "observations": int(len(group)),
             "confidence": confidence,
-            "confirmed": False,
+            "confirmed": confidence >= 0.75,
             "accepted": True,
         })
     return pd.DataFrame(rows, columns=columns)

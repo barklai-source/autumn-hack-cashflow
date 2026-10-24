@@ -16,6 +16,16 @@ def test_client_revenue_rule():
     assert result["category"] == "Выручка и поступления от клиентов"
 
 
+def test_bank_phrases_are_categorized_and_vague_purpose_stays_for_review():
+    assert categorize_rule({"amount": 500, "purpose": "Оплата по договору"})["category"] == "Выручка и поступления от клиентов"
+    assert categorize_rule({"amount": -500, "purpose": "Перечисление по УПД за комплектующие"})["category"] == "Закупки и поставщики"
+    assert categorize_rule({"amount": -500, "purpose": "Оплата поставки без НДС"})["category"] == "Закупки и поставщики"
+    assert categorize_rule({"amount": 500, "purpose": "Выплата заработной платы"})["category"] == "Требует проверки"
+    for purpose in ("", "прочее", "оплата", "перевод", "без НДС"):
+        result = categorize_rule({"amount": -500, "purpose": purpose})
+        assert result == {"category": "Требует проверки", "method": "правила", "confidence": 0.5, "needs_review": True}
+
+
 def test_user_labeled_examples_enable_classifier_without_fabricated_labels():
     frame = pd.DataFrame([
         {"date": pd.Timestamp("2025-01-01") + pd.Timedelta(days=i), "amount": -100.0,

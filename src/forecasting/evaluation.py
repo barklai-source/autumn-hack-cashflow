@@ -22,6 +22,16 @@ def error_metrics(actual: np.ndarray | pd.Series, predicted: np.ndarray | pd.Ser
     }
 
 
+def _summarize_predictions(predictions: pd.DataFrame) -> pd.DataFrame:
+    metrics = []
+    for (method, _), group in predictions.groupby(["method", predictions["date"].dt.year]):
+        row = {"method": method, **error_metrics(group["actual_net"], group["predicted_net"])}
+        balance_metrics = error_metrics(group["actual_balance_delta"], group["predicted_balance_delta"])
+        row.update({f"balance_{key}": value for key, value in balance_metrics.items()})
+        metrics.append(row)
+    return pd.DataFrame(metrics).groupby("method", as_index=False).mean(numeric_only=True)
+
+
 def walk_forward_evaluation(daily: pd.DataFrame, horizon: int = 7, max_origins: int = 5) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Evaluate baseline and ML with chronological expanding-window cutoffs."""
     if len(daily) < horizon + 45:
@@ -33,7 +43,11 @@ def walk_forward_evaluation(daily: pd.DataFrame, horizon: int = 7, max_origins: 
         first_origin = 35
         available_origins = len(data) - horizon - first_origin
     origin_count = min(max_origins, max(1, available_origins // 14 + 1))
-    origins = np.linspace(first_origin, len(data) - horizon, num=origin_count, dtype=int)
+    origins = (
+        np.array([len(data) - horizon])
+        if origin_count == 1
+        else np.linspace(first_origin, len(data) - horizon, num=origin_count, dtype=int)
+    )
     records = []
     for origin in sorted(set(origins)):
         history = data.iloc[:origin]
@@ -56,24 +70,40 @@ def walk_forward_evaluation(daily: pd.DataFrame, horizon: int = 7, max_origins: 
     predictions = pd.DataFrame(records)
     if predictions.empty:
         return predictions, pd.DataFrame()
-    metrics = []
-    for (method, _), group in predictions.groupby(["method", predictions["date"].dt.year]):
-        row = {"method": method, **error_metrics(group["actual_net"], group["predicted_net"])}
-        balance_metrics = error_metrics(group["actual_balance_delta"], group["predicted_balance_delta"])
-        row.update({f"balance_{key}": value for key, value in balance_metrics.items()})
-        metrics.append(row)
-    summary = pd.DataFrame(metrics).groupby("method", as_index=False).mean(numeric_only=True)
-    return predictions, summary
+    return predictions, _summarize_predictions(predictions)
 
 
-def evaluate_balance_horizons(daily: pd.DataFrame) -> pd.DataFrame:
+def evaluate_balance_horizons(
+    daily: pd.DataFrame,
+    seven_day_metrics: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     """Report available chronological 7/30/90-day net flow error summaries."""
     rows = []
-    for horizon in (7, 30, 90):
-        forecasts, metrics = walk_forward_evaluation(daily, horizon=horizon, max_origins=2)
+    if seven_day_metrics is not None and not seven_day_metrics.empty:
+        rows.extend(
+            {"horizon_days": 7, "method": row["method"],
+             "MAE": row["balance_MAE"], "RMSE": row["balance_RMSE"],
+             "WAPE": row["balance_WAPE"]}
+            for row in seven_day_metrics.to_dict("records")
+        )
+
+    long_predictions, long_metrics = walk_forward_evaluation(daily, horizon=90, max_origins=1)
+    if not long_predictions.empty:
+        thirty_day_predictions = long_predictions.groupby(["method", "origin"], sort=False).head(30)
+        metrics_by_horizon = {
+            30: _summarize_predictions(thirty_day_predictions),
+            90: long_metrics,
+        }
+    else:
+        _, thirty_day_metrics = walk_forward_evaluation(daily, horizon=30, max_origins=1)
+        metrics_by_horizon = {30: thirty_day_metrics}
+
+    for horizon, metrics in metrics_by_horizon.items():
         if not metrics.empty:
-            for row in metrics.to_dict("records"):
-                rows.append({"horizon_days": horizon, "method": row["method"],
-                             "MAE": row["balance_MAE"], "RMSE": row["balance_RMSE"],
-                             "WAPE": row["balance_WAPE"]})
+            rows.extend(
+                {"horizon_days": horizon, "method": row["method"],
+                 "MAE": row["balance_MAE"], "RMSE": row["balance_RMSE"],
+                 "WAPE": row["balance_WAPE"]}
+                for row in metrics.to_dict("records")
+            )
     return pd.DataFrame(rows)

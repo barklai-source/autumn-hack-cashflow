@@ -32,6 +32,7 @@ def calculate_forecast(
     reserve: float = 0,
     scenarios: int = 1000,
     start_date: pd.Timestamp | None = None,
+    daily_flows: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, dict, dict]:
     """Calculate forecast, historical validation and deterministic/scenario risk."""
     company_id = str(company["company_id"])
@@ -41,6 +42,7 @@ def calculate_forecast(
     forecast, details = build_forecast(
         categorized, horizon_days=horizon, events=events, recurring=recurring, account=company_id,
         start_date=start_date or pd.Timestamp(categorized["date"].max()),
+        daily_flows=daily_flows,
     )
     observed_days = set(pd.to_datetime(categorized["date"]).dt.normalize())
     calendar_days = pd.date_range(categorized["date"].min(), categorized["date"].max(), freq="D")
@@ -59,6 +61,7 @@ def calculate_forecast(
     risk = assess_risk(
         forecast, reserve=reserve, residuals=residuals, scenarios=scenarios,
         events=events.loc[events["account"].eq(company_id)] if not events.empty else events,
+        historical_net_flows=categorized.groupby("date")["signed_amount"].sum().to_numpy(dtype=float),
     )
     return forecast, details, risk
 

@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { ArrowRight, CalendarClock, CircleDollarSign, CreditCard, ShieldCheck, TrendingUp, Wallet } from 'lucide-react'
+import { ArrowRight, CalendarClock, CircleDollarSign, CreditCard, ShieldCheck, TrendingUp, TriangleAlert, Wallet } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { api } from '../api/client'
 import { BalanceChart } from '../components/dashboard/BalanceChart'
@@ -29,6 +29,7 @@ export function Dashboard() {
     <QueryState isLoading={summary.isLoading || forecast.isLoading} error={(summary.error ?? forecast.error) as Error | null}>
       {summary.data && forecast.data && <>
         {!summary.data.balance_is_current && <div className="notice"><CalendarClock size={17} /> Остаток из выписки актуален на {dateRu(summary.data.balance_date)} — это последний доступный фактический остаток, не баланс на сегодня.</div>}
+        {(summary.data.needs_review_count ?? 0) > 0 && <div className="notice"><TriangleAlert size={18} /> <span>Обнаружено {summary.data.needs_review_count} неопределённых платежей, которые не удалось распределить автоматически. Отметьте их категорию вручную — система запомнит ваш выбор</span> <Link className="text-link" to="/operations?category=Требует+проверки">Перейти к разметке <ArrowRight size={15} /></Link></div>}
         <div className="metrics-grid">
           <MetricCard title="Последний остаток" value={currency(summary.data.last_balance)} detail={dateRu(summary.data.balance_date)} icon={Wallet} tone="mint" />
           <MetricCard title="Прогноз через 30 дней" value={currency(summary.data.forecast_balance_30)} detail="по базовому сценарию" icon={TrendingUp} tone="blue" trend="up" />
