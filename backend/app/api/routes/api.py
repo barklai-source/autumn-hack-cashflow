@@ -3,8 +3,15 @@
 from __future__ import annotations
 
 import io
+import json
+import os
+import shutil
 import sqlite3
+import tempfile
+import uuid
+import zipfile
 from datetime import date
+from pathlib import Path, PurePosixPath
 
 import numpy as np
 import pandas as pd
@@ -19,7 +26,8 @@ from app.core.auth import (
     verify_session_token,
 )
 from app.schemas.api import (
-    AuthResponse, CategoryPatch, EventCreate, EventPatch, LoginRequest, RecurringPatch, RegisterRequest,
+    AuthResponse, CategoryPatch, DatasetSwitchRequest, EventCreate, EventPatch, LoginRequest,
+    RecurringPatch, RegisterRequest,
 )
 from app.services.categorization import categorize_operations
 from app.services.cache import CompanyResultCache
@@ -250,27 +258,218 @@ def health(request: Request):
 @router.post("/admin/reload-dataset")
 def reload_dataset(request: Request):
     _authorize_admin(request)
-    clear_dataset_caches()
-    refreshed = load_dataset(request.app.state.data_directory)
-    request.app.state.dataset = refreshed
-    company_ids = (
-        refreshed.companies["company_id"].astype(str).tolist()
-        if not refreshed.companies.empty else []
-    )
-    request.app.state.result_cache = CompanyResultCache(company_ids)
-    if not refreshed.operations.empty:
-        last_dates = refreshed.operations.groupby("company_id")["date"].max()
-        for company_id, last_actual_date in last_dates.items():
-            request.app.state.store.ensure_diverse_events(
-                str(company_id), last_actual_date.date(),
-            )
+    result = _activate_dataset(request, Path(request.app.state.data_directory))
     return {
-        "status": refreshed.status,
-        "message": refreshed.message,
-        "companies": _records(refreshed.companies),
-        "total": len(refreshed.companies),
-        "errors": refreshed.errors[:20],
+        "status": result["status"],
+        "message": result["message"],
+        "companies": result["companies"],
+        "total": result["companies_count"],
+        "errors": request.app.state.dataset.errors,
     }
+
+
+MAX_DATASET_UPLOAD_BYTES = 500 * 1024 * 1024
+
+
+def _managed_dataset_root(request: Request) -> Path:
+    default_directory = Path(getattr(
+        request.app.state,
+        "default_data_directory",
+        request.app.state.data_directory,
+    )).resolve()
+    root = Path(getattr(
+        request.app.state,
+        "dataset_storage_root",
+        default_directory.parent / ".managed-datasets",
+    )).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _validate_dataset(directory: Path):
+    if not (directory / "companies.csv").is_file():
+        raise HTTPException(status_code=422, detail="В датасете отсутствует обязательный файл companies.csv.")
+    if not (directory / "all_operations.csv").is_file():
+        raise HTTPException(status_code=422, detail="В датасете отсутствует обязательный файл all_operations.csv.")
+    clear_dataset_caches()
+    try:
+        candidate = load_dataset(directory)
+    except (OSError, UnicodeError, ValueError, pd.errors.ParserError) as error:
+        raise HTTPException(status_code=422, detail=f"Не удалось прочитать датасет: {error}") from error
+    if candidate.status != "ready" or candidate.companies.empty or candidate.operations.empty:
+        detail = "; ".join(candidate.errors) or candidate.message or "CSV не содержит пригодных данных."
+        raise HTTPException(status_code=422, detail=f"Структура датасета некорректна: {detail}")
+    return candidate
+
+
+def _activate_dataset(request: Request, directory: Path):
+    directory = directory.resolve()
+    candidate = _validate_dataset(directory)
+    return _publish_dataset(request, directory, candidate)
+
+
+def _publish_dataset(request: Request, directory: Path, candidate):
+    company_ids = candidate.companies["company_id"].astype(str).tolist()
+    new_cache = CompanyResultCache(company_ids)
+    last_dates = candidate.operations.groupby("company_id")["date"].max()
+    for company_id, last_actual_date in last_dates.items():
+        request.app.state.store.ensure_diverse_events(str(company_id), last_actual_date.date())
+    request.app.state.dataset = candidate
+    request.app.state.data_directory = directory.resolve()
+    request.app.state.result_cache = new_cache
+    return {
+        "status": "ok",
+        "message": candidate.message,
+        "companies_count": len(candidate.companies),
+        "operations_count": len(candidate.operations),
+        "companies": _records(candidate.companies),
+    }
+
+
+def _is_within(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _dataset_presets(request: Request) -> dict[str, Path]:
+    configured = os.getenv("CASHFLOW_DATASET_PRESETS", "")
+    presets: dict[str, Path] = {}
+    for entry in configured.split(","):
+        name, separator, value = entry.partition("=")
+        if separator and name.strip() and value.strip():
+            presets[name.strip()] = Path(value.strip()).expanduser().resolve()
+    default_directory = Path(getattr(
+        request.app.state,
+        "default_data_directory",
+        request.app.state.data_directory,
+    )).resolve()
+    base = default_directory.parent
+    presets.setdefault("default", default_directory)
+    for name in ("preloaded_test", "jury", "defense"):
+        presets.setdefault(name, (base / name).resolve())
+    return presets
+
+
+@router.post("/admin/dataset/switch")
+def switch_dataset(payload: DatasetSwitchRequest, request: Request):
+    _authorize_admin(request)
+    requested = Path(payload.dataset_name).expanduser()
+    presets = _dataset_presets(request)
+    if payload.dataset_name in presets:
+        directory = presets[payload.dataset_name]
+    else:
+        directory = requested.resolve()
+        allowed_roots = [
+            Path(getattr(
+                request.app.state,
+                "default_data_directory",
+                request.app.state.data_directory,
+            )).resolve().parent,
+            _managed_dataset_root(request),
+            *(path.parent for path in presets.values()),
+        ]
+        if not any(_is_within(directory, root) for root in allowed_roots):
+            raise HTTPException(status_code=403, detail="Путь датасета находится вне разрешённых директорий.")
+    if not directory.is_dir():
+        raise HTTPException(status_code=404, detail=f"Директория датасета не найдена: {directory}")
+    return _activate_dataset(request, directory)
+
+
+async def _save_upload(upload: UploadFile, destination: Path) -> int:
+    size = 0
+    with destination.open("wb") as output:
+        while chunk := await upload.read(1024 * 1024):
+            size += len(chunk)
+            if size > MAX_DATASET_UPLOAD_BYTES:
+                raise HTTPException(status_code=413, detail="Размер загрузки превышает лимит 500 МБ.")
+            output.write(chunk)
+    return size
+
+
+def _extract_dataset_zip(archive_path: Path, destination: Path) -> None:
+    try:
+        with zipfile.ZipFile(archive_path) as archive:
+            selected: dict[str, zipfile.ZipInfo] = {}
+            for member in archive.infolist():
+                relative = PurePosixPath(member.filename)
+                if relative.is_absolute() or ".." in relative.parts:
+                    raise HTTPException(status_code=422, detail="ZIP содержит небезопасный путь.")
+                if member.file_size > MAX_DATASET_UPLOAD_BYTES:
+                    raise HTTPException(status_code=413, detail="Файл внутри ZIP превышает лимит 500 МБ.")
+                if member.filename.endswith("/") or member.is_dir():
+                    continue
+                name = relative.name
+                if name in {"companies.csv", "all_operations.csv"}:
+                    if name in selected:
+                        raise HTTPException(status_code=422, detail=f"В ZIP найдено несколько файлов {name}.")
+                    selected[name] = member
+            required = {"companies.csv", "all_operations.csv"}
+            missing = required - selected.keys()
+            if missing:
+                raise HTTPException(
+                    status_code=422,
+                    detail="В ZIP отсутствуют файлы: " + ", ".join(sorted(missing)),
+                )
+            total_size = sum(member.file_size for member in selected.values())
+            if total_size > MAX_DATASET_UPLOAD_BYTES:
+                raise HTTPException(status_code=413, detail="Распакованный датасет превышает лимит 500 МБ.")
+            for name, member in selected.items():
+                with archive.open(member) as source, (destination / name).open("wb") as output:
+                    shutil.copyfileobj(source, output, length=1024 * 1024)
+    except zipfile.BadZipFile as error:
+        raise HTTPException(status_code=422, detail="Загруженный ZIP-архив повреждён.") from error
+    except (NotImplementedError, RuntimeError) as error:
+        raise HTTPException(status_code=422, detail="ZIP использует неподдерживаемое или зашифрованное сжатие.") from error
+
+
+@router.post("/admin/dataset/upload")
+async def upload_dataset(
+    request: Request,
+    file: UploadFile | None = File(default=None),
+    companies_file: UploadFile | None = File(default=None),
+    all_operations_file: UploadFile | None = File(default=None),
+):
+    _authorize_admin(request)
+    archive_upload = file
+    if archive_upload is not None and archive_upload.filename and not archive_upload.filename.lower().endswith(".zip"):
+        if companies_file is None and all_operations_file is None:
+            companies_file, all_operations_file = archive_upload, None
+            archive_upload = None
+    if archive_upload is not None and (companies_file is not None or all_operations_file is not None):
+        raise HTTPException(status_code=422, detail="Загрузите ZIP или пару CSV, не оба варианта сразу.")
+    if archive_upload is None and (companies_file is None or all_operations_file is None):
+        raise HTTPException(status_code=422, detail="Загрузите ZIP либо оба файла companies.csv и all_operations.csv.")
+
+    managed_root = _managed_dataset_root(request)
+    staging = Path(tempfile.mkdtemp(prefix=".staging-", dir=managed_root))
+    final_directory = managed_root / f"dataset-{uuid.uuid4().hex}"
+    try:
+        if archive_upload is not None:
+            archive_path = staging / "upload.zip"
+            await _save_upload(archive_upload, archive_path)
+            _extract_dataset_zip(archive_path, staging)
+            archive_path.unlink()
+        else:
+            if companies_file is None or all_operations_file is None:
+                raise HTTPException(status_code=422, detail="Необходимо передать оба CSV-файла.")
+            if Path(companies_file.filename or "").name.casefold() != "companies.csv":
+                raise HTTPException(status_code=422, detail="Первый CSV-файл должен называться companies.csv.")
+            if Path(all_operations_file.filename or "").name.casefold() != "all_operations.csv":
+                raise HTTPException(status_code=422, detail="Второй CSV-файл должен называться all_operations.csv.")
+            await _save_upload(companies_file, staging / "companies.csv")
+            await _save_upload(all_operations_file, staging / "all_operations.csv")
+        candidate = _validate_dataset(staging)
+        staging.rename(final_directory)
+        return _publish_dataset(request, final_directory, candidate)
+    except Exception:
+        if staging.exists():
+            shutil.rmtree(staging)
+        if final_directory.exists() and request.app.state.data_directory != final_directory:
+            shutil.rmtree(final_directory)
+        raise
 
 
 @router.get("/companies")

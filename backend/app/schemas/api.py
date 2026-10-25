@@ -17,6 +17,10 @@ class RegisterRequest(BaseModel):
     company_name: str | None = Field(default=None, max_length=200)
 
 
+class DatasetSwitchRequest(BaseModel):
+    dataset_name: str = Field(min_length=1, max_length=500)
+
+
 class AuthResponse(BaseModel):
     token: str
     role: Literal["admin", "company"]

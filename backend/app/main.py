@@ -29,6 +29,8 @@ async def lifespan(application: FastAPI):
     """Load static data and initialize local persistence once per process."""
     application.state.dataset = load_dataset(DATA_DIR)
     application.state.data_directory = DATA_DIR
+    application.state.default_data_directory = DATA_DIR
+    application.state.dataset_storage_root = DATA_DIR.parent / ".managed-datasets"
     application.state.store = SQLiteStore()
     application.state.store.cleanup_events()
     dataset = application.state.dataset

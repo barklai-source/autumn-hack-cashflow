@@ -1,3 +1,6 @@
+import io
+import zipfile
+
 import pandas as pd
 from fastapi.testclient import TestClient
 
@@ -412,6 +415,68 @@ def test_demo_companies_are_dynamic_and_admin_can_reload_dataset(tmp_path, monke
     assert reloaded.json()["companies"][0]["company_id"] == "ORG-NEW"
     assert app.state.dataset.companies.iloc[0]["company_id"] == "ORG-NEW"
     assert app.state.result_cache.company_data_version == {"ORG-NEW": 0}
+
+
+def test_admin_dataset_upload_and_switch_validate_before_activation(tmp_path, monkeypatch):
+    initial_dataset = _dataset()
+    candidate_dataset = _dataset()
+    invalid_dataset = Dataset(pd.DataFrame(), pd.DataFrame(), "invalid", "Некорректный датасет", ["missing columns"])
+    data_directory = tmp_path / "default"
+    prepared_directory = tmp_path / "prepared"
+    prepared_directory.mkdir()
+    for filename in ("companies.csv", "all_operations.csv"):
+        (prepared_directory / filename).write_text("placeholder", encoding="utf-8")
+
+    monkeypatch.setattr(main_module, "DATA_DIR", data_directory)
+    monkeypatch.setattr(main_module, "load_dataset", lambda _path: initial_dataset)
+    monkeypatch.setattr(api_module, "load_dataset", lambda _path: candidate_dataset)
+    store = SQLiteStore(tmp_path / "dataset-upload.sqlite")
+    monkeypatch.setattr(main_module, "SQLiteStore", lambda *_args, **_kwargs: store)
+
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as dataset_zip:
+        dataset_zip.writestr("companies.csv", "company_id;name\nC001;Company")
+        dataset_zip.writestr("all_operations.csv", "company_id;operation_id\nC001;operation-1")
+
+    with TestClient(app) as client:
+        assert client.post(
+            "/api/admin/dataset/upload",
+            files={"file": ("dataset.zip", archive.getvalue(), "application/zip")},
+        ).status_code == 401
+        admin = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()
+        headers = {"Authorization": f"Bearer {admin['token']}"}
+
+        uploaded = client.post(
+            "/api/admin/dataset/upload",
+            files={"file": ("dataset.zip", archive.getvalue(), "application/zip")},
+            headers=headers,
+        )
+        assert uploaded.status_code == 200
+        assert uploaded.json()["companies_count"] == 2
+        assert uploaded.json()["operations_count"] == 2
+        active_directory = app.state.data_directory
+
+        monkeypatch.setattr(api_module, "load_dataset", lambda _path: invalid_dataset)
+        rejected = client.post(
+            "/api/admin/dataset/upload",
+            files={
+                "companies_file": ("companies.csv", b"invalid", "text/csv"),
+                "all_operations_file": ("all_operations.csv", b"invalid", "text/csv"),
+            },
+            headers=headers,
+        )
+        assert rejected.status_code == 422
+        assert app.state.data_directory == active_directory
+        assert app.state.dataset is candidate_dataset
+
+        monkeypatch.setattr(api_module, "load_dataset", lambda _path: candidate_dataset)
+        switched = client.post(
+            "/api/admin/dataset/switch",
+            json={"dataset_name": str(prepared_directory)},
+            headers=headers,
+        )
+        assert switched.status_code == 200
+        assert app.state.data_directory == prepared_directory.resolve()
 
 
 def test_backend_classifier_uses_manual_overrides_to_resolve_uncertain_operations(tmp_path):

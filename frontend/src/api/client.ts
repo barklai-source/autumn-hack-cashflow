@@ -91,6 +91,34 @@ export const api = {
     request<{ status: string; message: string; companies: Company[]; total: number; errors: string[] }>('/admin/reload-dataset', {
       method: 'POST',
     }),
+  uploadDataset: (files: { zip?: File; companies?: File; operations?: File }) => {
+    const body = new FormData()
+    if (files.zip) {
+      body.append('file', files.zip)
+    } else {
+      if (files.companies) body.append('companies_file', files.companies)
+      if (files.operations) body.append('all_operations_file', files.operations)
+    }
+    return request<{
+      status: string
+      message: string
+      companies_count: number
+      operations_count: number
+      companies: Company[]
+    }>('/admin/dataset/upload', { method: 'POST', body })
+  },
+  switchDataset: (dataset_name: string) =>
+    request<{
+      status: string
+      message: string
+      companies_count: number
+      operations_count: number
+      companies: Company[]
+    }>('/admin/dataset/switch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dataset_name }),
+    }),
   summary: (id: string, horizon: number, reserve: number) => request<Summary>(`/companies/${id}/summary?horizon=${horizon}&reserve=${reserve}`),
   operations: (id: string, params: URLSearchParams) => request<OperationsResponse>(`/companies/${id}/operations?${params}`),
   categories: (id: string) => request<CategoryResponse>(`/companies/${id}/categories`),
