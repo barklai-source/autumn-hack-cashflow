@@ -52,7 +52,7 @@ export function OperationsPage() {
     setSearchParams(next, { replace: true })
   }
   return <div className="page-stack">
-    <div className="page-heading"><div><div className="eyebrow">ИСТОРИЯ КОМПАНИИ</div><h1>Операции</h1><p>Постраничная загрузка с сервера. Корректировки категорий сохраняются в SQLite.</p></div><span className="tag">{result.data?.total.toLocaleString('ru-RU') ?? '…'} операций</span></div>
+    <div className="page-heading"><div><div className="eyebrow">ИСТОРИЯ КОМПАНИИ</div><h1>Операции</h1><p>Постраничная загрузка с сервера. Корректировки категорий сохраняются в SQLite. Скоринг контрагентов — детерминированная демо-имитация открытых реестров, не официальная проверка ФНС.</p></div><span className="tag">{result.data?.total.toLocaleString('ru-RU') ?? '…'} операций</span></div>
     <section className="card">
       {(result.data?.needs_review_count ?? 0) > 0 && <div className="notice"><TriangleAlert size={17} /> <span>Есть операции, требующие ручной проверки.</span><button className="button secondary" onClick={() => { selectCategory('Требует проверки'); setPage(1) }}>Показать требующие проверки ({result.data?.needs_review_count})</button></div>}
       <div className="operation-filters">
@@ -66,7 +66,7 @@ export function OperationsPage() {
       </div>
       <QueryState isLoading={result.isLoading} error={result.error as Error | null}>
         {result.data?.items.length ? <div className="table-scroll"><table><thead><tr><th>Дата</th><th>Контрагент / назначение</th><th>Направление</th><th>Сумма</th><th>Остаток дня</th><th>Категория</th></tr></thead><tbody>{result.data.items.map((operation) => <tr key={operation.operation_id}>
-          <td className="nowrap">{dateRu(operation.operation_date)}</td><td><strong>{operation.counterparty_name || 'Не указан'}</strong><small className="table-subtitle">{operation.payment_purpose || '—'}</small><small className="table-subtitle">ИНН: {operation.counterparty_inn || '—'}</small></td>
+          <td className="nowrap">{dateRu(operation.operation_date)}</td><td><strong>{operation.counterparty_name || 'Не указан'}</strong><small className="table-subtitle">{operation.payment_purpose || '—'}</small><small className="table-subtitle">ИНН: {operation.counterparty_inn || '—'}</small>{operation.counterparty_risk && <span className={`counterparty-risk ${operation.counterparty_risk.score >= 80 ? 'high' : operation.counterparty_risk.score >= 55 ? 'medium' : 'low'}`} title={`${operation.counterparty_risk.advice} ${operation.counterparty_risk.source}`}>{operation.counterparty_risk.status} · задержка {Math.round(operation.counterparty_risk.delay_probability * 100)}%</span>}</td>
           <td><span className={`direction-tag ${operation.direction === 'поступление' ? 'income' : 'expense'}`}>{operation.direction}</span></td><td className={operation.signed_amount > 0 ? 'positive nowrap' : 'negative nowrap'}>{currency(operation.signed_amount)}</td><td className="nowrap">{currency(operation.balance_eod)}</td><td><select className="category-select" aria-label={`Категория ${operation.operation_id}`} value={operation.category} onChange={(event) => categoryChange.mutate({ operationId: operation.operation_id, value: event.target.value })}>{CATEGORIES.map((item) => <option key={item}>{item}</option>)}</select>{operation.needs_review && <small className="review-note">Проверьте вручную</small>}</td>
         </tr>)}</tbody></table></div> : <EmptyState>По этим фильтрам операций нет.</EmptyState>}
       </QueryState>

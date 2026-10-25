@@ -40,13 +40,13 @@ def verify_session_token(token: str) -> dict[str, object] | None:
         if not hmac.compare_digest(expected, _decode(encoded_signature)):
             return None
         payload = json.loads(_decode(encoded_payload))
-        if not isinstance(payload, dict) or payload.get("role") not in {"admin", "company"}:
+        if not isinstance(payload, dict) or payload.get("role") not in {"admin", "owner", "company"}:
             return None
         if not isinstance(payload.get("exp"), int) or payload["exp"] <= int(time.time()):
             return None
         if not isinstance(payload.get("display_name"), str):
             return None
-        if payload["role"] == "company" and not isinstance(payload.get("company_id"), str):
+        if payload["role"] in {"owner", "company"} and not isinstance(payload.get("company_id"), str):
             return None
         return payload
     except (ValueError, TypeError, UnicodeError, json.JSONDecodeError):
@@ -87,7 +87,7 @@ def authenticate_user(dataset, username: str, password: str, store=None) -> dict
             if not verify_password(password, registered["password"]):
                 return None
             return {
-                "role": registered["role"],
+                "role": "owner" if registered["role"] == "company" else registered["role"],
                 "company_id": registered["company_id"],
                 "display_name": registered["company_name"],
                 "inn": registered["inn"],
@@ -104,7 +104,7 @@ def authenticate_user(dataset, username: str, password: str, store=None) -> dict
         return None
     company = matches.iloc[0]
     return {
-        "role": "company",
+        "role": "owner",
         "company_id": str(company["company_id"]),
         "display_name": str(company["name"]),
         "inn": login if demo_ordinal is not None and inns.eq(login).sum() == 0 else str(company["inn"]),

@@ -1,0 +1,38 @@
+.counterparty-risk {
+  display: inline-flex;
+  width: fit-content;
+  margin-top: 6px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.counterparty-risk.low {
+  color: #13734c;
+  background: #e6f6ed;
+}
+
+.counterparty-risk.medium {
+  color: #986313;
+  background: #fff4d9;
+}
+
+.counterparty-risk.high {
+  color: #a83737;
+  background: #ffebeb;
+}
+
+.mode-switch {
+  white-space: nowrap;
+}
+
+.mode-switch-error {
+  margin: 0 24px;
+}
+
+@media (max-width: 900px) {
+  .company-picker {
+    flex-wrap: wrap;
+  }
+}

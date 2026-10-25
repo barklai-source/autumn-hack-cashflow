@@ -5,6 +5,7 @@ import pandas as pd
 
 from app.core.storage import SQLiteStore
 from app.services.categorization import categorize_operations
+from app.services.counterparty_risk import incoming_delay_probability
 from app.services.recurring import company_recurring
 from src.forecasting.prediction import build_forecast
 from src.risk.assessment import assess_risk
@@ -33,11 +34,14 @@ def calculate_forecast(
     scenarios: int = 1000,
     start_date: pd.Timestamp | None = None,
     daily_flows: pd.DataFrame | None = None,
+    owner_inn: str | None = None,
 ) -> tuple[pd.DataFrame, dict, dict]:
     """Calculate forecast, historical validation and deterministic/scenario risk."""
     company_id = str(company["company_id"])
     categorized = categorize_operations(operations, store)
-    events = _event_frame(store.list_events(company_id, include_cancelled=False))
+    events = _event_frame(
+        store.list_events(company_id, include_cancelled=False, owner_inn=owner_inn),
+    )
     recurring = company_recurring(categorized, store)
     forecast, details = build_forecast(
         categorized, horizon_days=horizon, events=events, recurring=recurring, account=company_id,
@@ -63,6 +67,30 @@ def calculate_forecast(
         events=events.loc[events["account"].eq(company_id)] if not events.empty else events,
         historical_net_flows=categorized.groupby("date")["signed_amount"].sum().to_numpy(dtype=float),
     )
+    delay_probability = incoming_delay_probability(categorized)
+    risk["counterparty_delay_probability"] = delay_probability
+    if delay_probability is not None and risk.get("probability") is not None:
+        base_probability = float(risk["probability"])
+        adjusted_probability = 1 - (1 - base_probability) * (1 - delay_probability * 0.25)
+        risk["probability"] = adjusted_probability
+        risk["gap_probability"] = adjusted_probability
+        risk["risk_level"] = (
+            "высокий" if adjusted_probability >= 0.5 else
+            "средний" if adjusted_probability >= 0.15 or risk.get("first_breach") is not None else
+            "низкий"
+        )
+        warning = risk.get("warning")
+        if isinstance(warning, dict):
+            warning["probability"] = adjusted_probability
+            warning["gap_probability"] = adjusted_probability
+            warning["reasons"] += (
+                f" Учтён симуляционный риск задержки поступлений от контрагентов "
+                f"{delay_probability:.0%}."
+            )
+            warning["action"] += (
+                " Дополнительно свяжитесь с плательщиками из группы повышенного риска "
+                "и подтвердите сроки поступлений."
+            )
     return forecast, details, risk
 
 

@@ -52,6 +52,22 @@ def test_unknown_balance_has_no_success_shaped_risk_numbers():
     assert result["method"] == "Блочный бутстрап (100 симуляций) с учётом волатильности потока"
 
 
+def test_probabilistic_gap_without_deterministic_breach_has_actionable_warning():
+    forecast = pd.DataFrame({
+        "date": pd.date_range("2025-01-01", periods=30),
+        "balance": np.full(30, 1_000.0),
+        "forecast_net": np.zeros(30),
+    })
+    result = assess_risk(forecast, reserve=1_000, historical_net_flows=[-50_000, 50_000], seed=4)
+
+    assert result["first_breach"] is None
+    assert result["gap_probability"] > 0
+    assert result["warning"] is not None
+    assert result["warning"]["date"] in forecast["date"].values
+    assert result["warning"]["deficit"] > 0
+    assert "центр-инвест" in result["warning"]["action"].lower()
+
+
 def test_risk_fallback_is_reproducible_and_reports_minimum_balance_quantiles():
     forecast = pd.DataFrame({
         "date": pd.date_range("2025-01-01", periods=10),
@@ -90,3 +106,4 @@ def test_warning_recommends_actions_and_names_large_outflows():
     assert "перенос оплаты поставщикам на 7–14 дней" in warning["action"]
     assert "запросить предоплату" in warning["action"].lower()
     assert "рассмотреть овердрафт" in warning["action"].lower()
+    assert "банка центр-инвест" in warning["action"].lower()

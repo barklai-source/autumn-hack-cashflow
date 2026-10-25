@@ -95,7 +95,13 @@ export function LoginPage({ onLogin }: { onLogin: (session: AuthSession) => void
         {error && <p className="login-error" role="alert">{error}</p>}
         <button className="button primary login-submit" type="submit" disabled={isLoading || !/^\d{10}(\d{2})?$/.test(inn)}>{isLoading ? 'Подключаем…' : 'Зарегистрировать и подключить счета'} <LogIn size={17} /></button>
       </form>}
-      <div className="demo-logins"><h2>Демо-доступ</h2>
+      <div className="demo-logins"><h2>Быстрый вход</h2>
+        <button className="button primary" type="button" disabled={isLoading || !(demoCompanies.data?.items.length)} onClick={() => {
+          const company = demoCompanies.data?.items[0]
+          if (company) void submit({ username: company.inn, password: '1234' })
+        }}>Войти как Предприниматель</button>
+        <button className="button secondary" type="button" disabled={isLoading} onClick={() => void submit({ username: 'admin', password: 'admin' })}>Войти как Стенд жюри / Админ</button>
+        <h2>Другие демо-компании</h2>
         {(demoCompanies.data?.items ?? []).map((company) => <button key={company.company_id} className="button secondary" type="button" disabled={isLoading} onClick={() => void submit({ username: company.inn, password: '1234' })}>Войти по ИНН {company.inn} ({company.company_id})</button>)}
         {(demoCompanies.data?.items.length ?? 0) > 1 && <button className="button secondary" type="button" disabled={isLoading} onClick={() => startDemoRegistration(demoCompanies.data!.items[1].inn)}>Протестировать регистрацию по ИНН {demoCompanies.data!.items[1].inn}</button>}
         <button className="button secondary" type="button" disabled={isLoading} onClick={() => void submit({ username: 'admin', password: 'admin' })}>Администратор банка (admin)</button>

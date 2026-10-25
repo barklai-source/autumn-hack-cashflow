@@ -1,15 +1,36 @@
 import io
 import zipfile
+from datetime import date
 
 import pandas as pd
-from fastapi.testclient import TestClient
+from fastapi.testclient import TestClient as FastAPITestClient
 
 import app.main as main_module
 from app.api.routes import api as api_module
+from app.core.auth import create_session_token
 from app.core.storage import SQLiteStore
 from app.main import app
 from app.services.categorization import categorize_operations
 from app.services.data_loader import Dataset
+
+
+_TEST_ADMIN_TOKEN = create_session_token({
+    "role": "admin", "company_id": None, "display_name": "Test admin",
+})
+
+
+class TestClient(FastAPITestClient):
+    def __init__(self, app, **kwargs):
+        headers = dict(kwargs.pop("headers", {}) or {})
+        headers.setdefault("Authorization", f"Bearer {_TEST_ADMIN_TOKEN}")
+        super().__init__(app, headers=headers, **kwargs)
+
+
+def _session_headers(role: str, company_id: str | None, display_name: str, inn: str | None):
+    token = create_session_token({
+        "role": role, "company_id": company_id, "display_name": display_name, "inn": inn,
+    })
+    return {"Authorization": f"Bearer {token}"}
 
 
 def _dataset():
@@ -26,7 +47,7 @@ def _dataset():
             "company_id": company_id, "operation_id": f"{company_id}-1",
             "date": pd.Timestamp("2025-01-01"), "operation_date": pd.Timestamp("2025-01-01"),
             "amount": 100, "signed_amount": 100, "direction": "поступление",
-            "counterparty_inn": "000001", "counterparty_name": "Покупатель",
+            "counterparty_inn": "7701234567", "counterparty_name": "Покупатель",
             "payment_purpose": "Оплата от клиента", "balance_eod": balance,
             "balance": balance, "counterparty": "Покупатель", "inn": "000001",
             "purpose": "Оплата от клиента", "account": company_id,
@@ -50,6 +71,7 @@ def test_api_company_isolation_pagination_and_saved_categories(tmp_path, monkeyp
         assert rows["total"] == 1
         assert rows["needs_review_count"] == 0
         assert rows["items"][0]["company_id"] == "C001"
+        assert rows["items"][0]["counterparty_risk"]["status"]
         operation_id = rows["items"][0]["operation_id"]
         changed = client.patch(f"/api/companies/C001/operations/{operation_id}/category", json={"category": "Аренда"})
         assert changed.status_code == 200
@@ -243,7 +265,8 @@ def test_event_csv_skips_test_amount_and_reset_demo_rebuilds_six_events(tmp_path
     }
 
 
-def test_model_evaluation_returns_one_row_per_date_with_method_columns(tmp_path, monkeypatch):
+def test_model_evaluation_returns_one_row_per_date_with_method_columns(tmp_path, monkeypatch, caplog):
+    caplog.set_level("INFO", logger=api_module.LOGGER.name)
     dataset = _dataset()
     rows = []
     balance = 10000
@@ -282,6 +305,23 @@ def test_model_evaluation_returns_one_row_per_date_with_method_columns(tmp_path,
 
     assert response.status_code == 200
     assert forecast.status_code == 200
+    evaluation_payload = response.json()
+    assert [step["step"] for step in evaluation_payload["calculation_trace"]["steps"]] == [1, 2, 3, 4, 5]
+    assert evaluation_payload["quality_metrics"]["train_test"]["test_days"] > 0
+    assert {row["method"].split(" (")[0] for row in evaluation_payload["quality_metrics"]["comparison"]} == {
+        "Baseline Moving Average", "Seasonal Holt-Winters", "Гибридный ансамбль проекта",
+    }
+    assert set(evaluation_payload["quality_metrics"]["cash_gap_confusion"]) >= {
+        "TP", "FP", "FN", "TN", "percentages", "roc_auc", "forecast_risk_probability",
+    }
+    assert evaluation_payload["quality_metrics"]["category_confusion"]["sample_count"] == len(dataset.operations)
+    assert 0 <= evaluation_payload["quality_metrics"]["category_confusion"]["accuracy"] <= 1
+    assert all(
+        row["MAE"] is not None and row["RMSE"] is not None
+        for row in evaluation_payload["quality_metrics"]["comparison"]
+    )
+    assert all(step["timestamp"] for step in evaluation_payload["calculation_trace"]["steps"])
+    assert "forecast_trace company_id=C001" in caplog.text
     assert len(forecast.json()["items"]) == 30
     base_payload = forecast.json()
     adjusted_payload = adjusted_forecast.json()
@@ -333,14 +373,15 @@ def test_login_roles_and_company_data_isolation(tmp_path, monkeypatch):
         assert admin_login.status_code == 200
         assert admin_login.json()["role"] == "admin"
         assert company_login.status_code == 200
-        assert company_login.json()["role"] == "company"
+        assert company_login.json()["role"] == "owner"
         assert company_login.json()["company_id"] == "C001"
         assert company_password_login.json()["company_id"] == "C001"
         assert inn_login.json()["company_id"] == "C001"
         assert demo_inn_login.json()["company_id"] == "C001"
         assert demo_inn_login.json()["inn"] == "7701001001"
         assert invalid_login.status_code == 401
-        assert client.get("/api/auth/me").status_code == 401
+        assert client.get("/api/auth/me", headers={"Authorization": ""}).status_code == 401
+        assert client.get("/api/companies", headers={"Authorization": ""}).status_code == 401
         current_user = client.get("/api/auth/me", headers=company_headers).json()
         assert current_user["company_id"] == "C001"
         assert current_user["inn"] == "000100"
@@ -387,6 +428,102 @@ def test_inn_lookup_registration_and_registered_login(tmp_path, monkeypatch):
     assert stored_user["password"] != "test-password"
 
 
+def test_owner_sessions_are_isolated_and_cannot_access_other_companies(tmp_path, monkeypatch):
+    monkeypatch.setattr(main_module, "load_dataset", lambda _path: _dataset())
+    store = SQLiteStore(tmp_path / "owner-isolation.sqlite")
+    monkeypatch.setattr(main_module, "SQLiteStore", lambda *_args, **_kwargs: store)
+    app.state.dataset = _dataset()
+    app.state.data_directory = tmp_path
+    app.state.store = store
+    owner_a = _session_headers("owner", "C001", "Владелец А", "7711111111")
+    owner_b = _session_headers("owner", "C001", "Владелец Б", "7722222222")
+
+    with TestClient(app) as client:
+        assert client.get("/api/companies", headers=owner_a).json()["total"] == 1
+        assert client.get("/api/companies/C002", headers=owner_a).status_code == 403
+        assert client.get("/api/auth/lookup-inn?inn=7701002002", headers=owner_a).json()["found"] is False
+        event_payload = {
+            "date": "2025-02-01", "amount": 5000, "direction": "поступление",
+            "category": "Выручка и поступления от клиентов", "event_type": "Поступление",
+            "description": "Оплата по договору", "counterparty_name": "Покупатель",
+            "counterparty_inn": "7701234567", "source": "ручной ввод",
+            "status": "Ожидается",
+        }
+        event_a = client.post("/api/companies/C001/events", json=event_payload, headers=owner_a)
+        event_b = client.post(
+            "/api/companies/C001/events",
+            json={**event_payload, "description": "Событие другого владельца"},
+            headers=owner_b,
+        )
+        assert event_a.status_code == event_b.status_code == 201
+        assert event_a.json()["counterparty_inn"] == "7701234567"
+        assert event_a.json()["counterparty_name"] == "Покупатель"
+        visible_a = client.get("/api/companies/C001/events", headers=owner_a).json()["items"]
+        visible_b = client.get("/api/companies/C001/events", headers=owner_b).json()["items"]
+        assert any(item["id"] == event_a.json()["id"] for item in visible_a)
+        visible_event = next(item for item in visible_a if item["id"] == event_a.json()["id"])
+        assert visible_event["counterparty_inn"] == "7701234567"
+        assert visible_event["counterparty_name"] == "Покупатель"
+        assert visible_event["counterparty_risk"]["status"]
+        assert not any(item["id"] == event_b.json()["id"] for item in visible_a)
+        assert any(item["id"] == event_b.json()["id"] for item in visible_b)
+        assert client.patch(
+            f"/api/companies/C001/events/{event_a.json()['id']}",
+            json={"description": "изменено"},
+            headers=owner_b,
+        ).status_code == 404
+        assert client.post("/api/companies/C001/events/reset-demo", headers=owner_a).status_code == 200
+        after_reset_b = client.get("/api/companies/C001/events", headers=owner_b).json()["items"]
+        assert any(item["id"] == event_b.json()["id"] for item in after_reset_b)
+
+
+def test_sensitive_log_filter_masks_tax_ids_and_counterparty_names():
+    import logging
+    from io import StringIO
+
+    from app.core.log_sanitizer import SensitiveLogFilter, configure_sensitive_logging
+
+    log_filter = SensitiveLogFilter()
+    log_filter.update_dataset(_dataset())
+    record = logging.LogRecord(
+        "test", logging.INFO, __file__, 1, "Проверка %s ИНН %s", ("Покупатель", "770 123 4567"), None,
+    )
+
+    assert log_filter.filter(record)
+    assert "Покупатель" not in record.getMessage()
+    assert "770 123 4567" not in record.getMessage()
+    logger = logging.getLogger("test_sensitive_access")
+    stream = StringIO()
+    handler = logging.StreamHandler(stream)
+    logger.addHandler(handler)
+    logger.propagate = False
+    try:
+        configure_sensitive_logging(_dataset())
+        logger.warning("request_inn=%s counterparty=%s", "7701234567", "Покупатель")
+        assert "7701234567" not in stream.getvalue()
+        assert "Покупатель" not in stream.getvalue()
+    finally:
+        logger.removeHandler(handler)
+        handler.close()
+
+
+def test_short_history_company_can_receive_forecast_without_server_error(tmp_path, monkeypatch):
+    dataset = _dataset()
+    dataset.operations = dataset.operations.iloc[[0]].copy()
+    store = SQLiteStore(tmp_path / "short-history.sqlite")
+    monkeypatch.setattr(main_module, "load_dataset", lambda _path: dataset)
+    monkeypatch.setattr(main_module, "SQLiteStore", lambda *_args, **_kwargs: store)
+    app.state.dataset = dataset
+    app.state.data_directory = tmp_path
+    app.state.store = store
+
+    with TestClient(app) as client:
+        response = client.get("/api/companies/C001/forecast?horizon=30")
+
+    assert response.status_code == 200
+    assert response.json()["horizon"] == 30
+
+
 def test_demo_companies_are_dynamic_and_admin_can_reload_dataset(tmp_path, monkeypatch):
     initial_dataset = _dataset()
     refreshed_dataset = _dataset()
@@ -401,7 +538,7 @@ def test_demo_companies_are_dynamic_and_admin_can_reload_dataset(tmp_path, monke
     monkeypatch.setattr(api_module, "load_dataset", lambda _path: refreshed_dataset)
 
     with TestClient(app) as client:
-        assert client.post("/api/admin/reload-dataset").status_code == 401
+        assert client.post("/api/admin/reload-dataset", headers={"Authorization": ""}).status_code == 401
         demo_companies = client.get("/api/auth/demo-companies")
         admin = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()
         reloaded = client.post(
@@ -442,6 +579,7 @@ def test_admin_dataset_upload_and_switch_validate_before_activation(tmp_path, mo
         assert client.post(
             "/api/admin/dataset/upload",
             files={"file": ("dataset.zip", archive.getvalue(), "application/zip")},
+            headers={"Authorization": ""},
         ).status_code == 401
         admin = client.post("/api/auth/login", json={"username": "admin", "password": "admin"}).json()
         headers = {"Authorization": f"Bearer {admin['token']}"}
@@ -477,6 +615,58 @@ def test_admin_dataset_upload_and_switch_validate_before_activation(tmp_path, mo
         )
         assert switched.status_code == 200
         assert app.state.data_directory == prepared_directory.resolve()
+
+
+def test_tax_calendar_events_use_history_and_are_idempotent(tmp_path):
+    store = SQLiteStore(tmp_path / "tax-calendar.sqlite")
+    anchor = date(2026, 1, 1)
+
+    assert store.ensure_tax_calendar_events("C001", anchor, {}) == 0
+    created = store.ensure_tax_calendar_events("C001", anchor, {"НДС": 42000, "УСН": 18000})
+    assert created == 4
+    assert store.ensure_tax_calendar_events("C001", anchor, {"НДС": 42000, "УСН": 18000}) == 0
+
+    tax_events = [
+        event for event in store.list_events("C001")
+        if event["source"] == "Налоговый календарь ФНС"
+    ]
+    assert len(tax_events) == 4
+    assert {event["amount"] for event in tax_events} == {42000, 18000}
+    assert all(event["status"] == "Ожидается" for event in tax_events)
+    assert all(event["event_date"] > anchor.isoformat() for event in tax_events)
+
+
+def test_events_endpoint_generates_tax_calendar_from_company_history(tmp_path, monkeypatch):
+    dataset = _dataset()
+    tax_payment = dataset.operations.iloc[0].to_dict()
+    tax_payment.update({
+        "operation_id": "C001-tax-1",
+        "date": pd.Timestamp("2025-01-02"),
+        "operation_date": pd.Timestamp("2025-01-02"),
+        "amount": -2500,
+        "signed_amount": -2500,
+        "direction": "списание",
+        "payment_purpose": "Единый налоговый платеж ЕНП",
+        "purpose": "Единый налоговый платеж ЕНП",
+        "balance_eod": 850,
+        "balance": 850,
+    })
+    dataset.operations = pd.concat([dataset.operations, pd.DataFrame([tax_payment])], ignore_index=True)
+    monkeypatch.setattr(main_module, "load_dataset", lambda _path: dataset)
+    store = SQLiteStore(tmp_path / "tax-calendar-api.sqlite")
+    monkeypatch.setattr(main_module, "SQLiteStore", lambda *_args, **_kwargs: store)
+
+    with TestClient(app) as client:
+        response = client.get("/api/companies/C001/events")
+
+    generated = [
+        event for event in response.json()["items"]
+        if event["source"] == "Налоговый календарь ФНС"
+    ]
+    assert response.status_code == 200
+    assert len(generated) == 3
+    assert {event["amount"] for event in generated} == {2500}
+    assert {event["date"] for event in generated} == {"2025-01-28", "2025-02-28", "2025-03-28"}
 
 
 def test_backend_classifier_uses_manual_overrides_to_resolve_uncertain_operations(tmp_path):

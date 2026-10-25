@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom'
 import { Activity, BarChart3, Building2, CalendarClock, ChevronDown, CircleDollarSign, LayoutDashboard, LogOut, Repeat2, Sparkles, WalletCards } from 'lucide-react'
+import { api } from '../api/client'
 import { useCompanies, useHealth } from '../hooks/queries'
 import type { AuthSession, Company } from '../types/api'
 
@@ -15,13 +16,15 @@ const navigation = [
   { to: '/companies', label: 'Все компании', icon: Building2 },
 ]
 
-export function Shell({ user, onLogout }: { user: AuthSession; onLogout: () => void }) {
+export function Shell({ user, onSessionChange, onLogout }: { user: AuthSession; onSessionChange: (session: AuthSession) => void; onLogout: () => void }) {
   const location = useLocation()
   const health = useHealth()
   const companies = useCompanies()
   const [companyId, setCompanyId] = useState(() => localStorage.getItem('selected-company') ?? '')
+  const [switchError, setSwitchError] = useState('')
+  const [switchingMode, setSwitchingMode] = useState(false)
   const items = companies.data?.items ?? []
-  const isCompanyUser = user.role === 'company'
+  const isCompanyUser = user.role !== 'admin'
   const selectedCompanyId = isCompanyUser ? user.company_id : companyId
   const activeCompany = items.find((company) => company.company_id === selectedCompanyId) ?? items[0]
   const visibleNavigation = navigation.filter((item) => user.role === 'admin' || item.to !== '/companies')
@@ -40,6 +43,24 @@ export function Shell({ user, onLogout }: { user: AuthSession; onLogout: () => v
   const selectCompany = (company: Company) => {
     localStorage.setItem('selected-company', company.company_id)
     setCompanyId(company.company_id)
+  }
+
+  const switchMode = async () => {
+    setSwitchError('')
+    setSwitchingMode(true)
+    try {
+      if (user.role === 'admin') {
+        const company = activeCompany ?? (await api.demoCompanies()).items[0]
+        if (!company) throw new Error('В датасете нет компании для режима предпринимателя.')
+        onSessionChange(await api.login(company.inn, '1234'))
+      } else {
+        onSessionChange(await api.login('admin', 'admin'))
+      }
+    } catch (cause) {
+      setSwitchError(cause instanceof Error ? cause.message : 'Не удалось переключить режим.')
+    } finally {
+      setSwitchingMode(false)
+    }
   }
 
   useEffect(() => {
@@ -78,9 +99,12 @@ export function Shell({ user, onLogout }: { user: AuthSession; onLogout: () => v
                 {items.map((company) => <option key={company.company_id} value={company.company_id}>{company.company_id} · {company.name}</option>)}
               </select>
             )}
-            {isCompanyUser ? null : <><ChevronDown size={14} /><span className="role-badge admin-badge">Администратор</span></>}
+            {!isCompanyUser && activeCompany?.inn && <span className="inn-badge">ИНН {activeCompany.inn}</span>}
+            {!isCompanyUser && <><ChevronDown size={14} /><span className="role-badge admin-badge">Администратор</span></>}
+            <button className="button secondary mode-switch" type="button" disabled={switchingMode} onClick={() => void switchMode()}>{switchingMode ? 'Переключение…' : `Режим: ${isCompanyUser ? 'Предприниматель' : 'Стенд жюри'}`}</button>
           </div>
         </header>
+        {switchError && <div className="inline-error mode-switch-error" role="alert">{switchError}</div>}
         <section className="content"><Outlet context={{ company: activeCompany, dataAvailable: health.data?.data_available ?? false, user }} /></section>
       </main>
     </div>

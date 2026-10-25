@@ -16,6 +16,7 @@ if str(PROJECT_DIR) not in sys.path:
 
 from app.api.routes.api import router
 from app.core.config import DATA_DIR, FRONTEND_ORIGINS
+from app.core.log_sanitizer import configure_sensitive_logging
 from app.core.storage import SQLiteStore
 from app.services.data_loader import load_dataset
 from app.services.cache import CompanyResultCache
@@ -28,6 +29,7 @@ FRONTEND_DIST = PROJECT_DIR / "frontend" / "dist"
 async def lifespan(application: FastAPI):
     """Load static data and initialize local persistence once per process."""
     application.state.dataset = load_dataset(DATA_DIR)
+    configure_sensitive_logging(application.state.dataset)
     application.state.data_directory = DATA_DIR
     application.state.default_data_directory = DATA_DIR
     application.state.dataset_storage_root = DATA_DIR.parent / ".managed-datasets"

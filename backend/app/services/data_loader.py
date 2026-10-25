@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import logging
 import hashlib
 import re
@@ -35,7 +37,7 @@ COMPANY_ALIASES = {
     "first_operation_date": ("first_operation_date", "дата первой операции"),
     "last_operation_date": ("last_operation_date", "дата последней операции"),
 }
-REQUIRED_OPERATIONS = ("company_id", "operation_id", "operation_date", "amount", "direction", "balance_eod")
+REQUIRED_OPERATIONS = ("company_id", "operation_date", "amount", "direction", "balance_eod")
 
 
 def _generated_company_inn(company_id: str) -> str:
@@ -60,7 +62,7 @@ def _column_map(columns: list[object], aliases: dict[str, tuple[str, ...]]) -> d
 
 
 def read_csv(path: Path, dtypes: dict[str, str] | None = None) -> pd.DataFrame:
-    """Read the case CSV format with BOM, semicolon and string identifiers."""
+    """Read CSV files with common Russian encodings and delimiters."""
     resolved = path.resolve()
     stat = resolved.stat()
     dtype_key = tuple(sorted((dtypes or {}).items()))
@@ -74,7 +76,66 @@ def _read_csv_cached(
     _size: int,
     dtypes: tuple[tuple[str, str], ...],
 ) -> pd.DataFrame:
-    return pd.read_csv(path, sep=";", encoding="utf-8-sig", dtype=dict(dtypes), low_memory=False)
+    content = Path(path).read_bytes()
+    decoded = None
+    selected_encoding = None
+    for encoding in ("utf-8-sig", "utf-8", "cp1251"):
+        try:
+            decoded = content.decode(encoding)
+            selected_encoding = encoding
+            break
+        except UnicodeDecodeError:
+            continue
+    if decoded is None:
+        raise UnicodeError(f"Не удалось определить кодировку CSV: {path}")
+
+    sample = decoded[:65536]
+    try:
+        detected_delimiter = csv.Sniffer().sniff(sample, delimiters=",;\t").delimiter
+    except csv.Error:
+        detected_delimiter = None
+
+    delimiters = [detected_delimiter, ";", ",", "\t", None]
+    candidates = []
+    seen_delimiters = set()
+    header_line = next((line for line in sample.splitlines() if line.strip()), "")
+    for delimiter in delimiters:
+        if delimiter in seen_delimiters:
+            continue
+        seen_delimiters.add(delimiter)
+        try:
+            header_columns = next(csv.reader(
+                [header_line],
+                delimiter=delimiter or ",",
+            ))
+        except (csv.Error, StopIteration, TypeError):
+            continue
+
+        normalized_columns = {
+            str(column).strip().lower().replace("ё", "е")
+            for column in header_columns
+        }
+        aliases = COMPANY_ALIASES if Path(path).name == "companies.csv" else OPERATION_ALIASES
+        recognized_columns = {
+            alias.strip().lower().replace("ё", "е")
+            for variants in aliases.values()
+            for alias in variants
+        }
+        score = len(normalized_columns & recognized_columns)
+        candidates.append((score, len(header_columns), delimiter))
+    if candidates:
+        _, _, selected_delimiter = max(candidates, key=lambda candidate: (candidate[0], candidate[1]))
+        frame = pd.read_csv(
+            io.StringIO(decoded),
+            sep=selected_delimiter,
+            engine="python",
+            dtype="string",
+        )
+        for column, dtype in dtypes:
+            if column in frame.columns:
+                frame[column] = frame[column].astype(dtype)
+        return frame
+    raise ValueError(f"Не удалось прочитать CSV: {path} ({selected_encoding})")
 
 
 @dataclass
@@ -169,7 +230,7 @@ def _load_dataset_uncached(data_dir: Path = DATA_DIR) -> Dataset:
             axis=1,
         )
     except (OSError, UnicodeError, pd.errors.ParserError, ValueError) as error:
-        LOGGER.exception("Unable to load company catalog from %s", companies_path)
+        LOGGER.error("Unable to load company catalog from %s (%s)", companies_path, type(error).__name__)
         return Dataset(pd.DataFrame(), pd.DataFrame(), "invalid", f"Ошибка чтения справочника компаний: {error}", [str(error)])
 
     try:
@@ -187,7 +248,7 @@ def _load_dataset_uncached(data_dir: Path = DATA_DIR) -> Dataset:
             return Dataset(companies, pd.DataFrame(), "incomplete",
                            f"Не найдены all_operations.csv или каталог statements в {data_dir}.", errors)
     except (OSError, UnicodeError, pd.errors.ParserError, ValueError) as error:
-        LOGGER.exception("Unable to load operations from %s", data_dir)
+        LOGGER.error("Unable to load operations from %s (%s)", data_dir, type(error).__name__)
         return Dataset(companies, pd.DataFrame(), "invalid", f"Ошибка чтения операций: {error}", [*errors, str(error)])
 
     if operations.empty:
@@ -241,22 +302,29 @@ def _load_operations_file_cached(path: str, _modified_ns: int, _size: int) -> pd
     if "operation_id" not in operations:
         operations["operation_id"] = [f"{source_path.stem}-{index}" for index in range(len(operations))]
     operations["company_id"] = operations["company_id"].astype("string").str.strip()
-    operations["operation_id"] = operations["operation_id"].astype("string").str.strip()
+    if "operation_id" in operations:
+        operations["operation_id"] = operations["operation_id"].astype("string").str.strip()
+    else:
+        operations["operation_id"] = pd.Series(pd.NA, index=operations.index, dtype="string")
     operations["operation_date"] = pd.to_datetime(operations["operation_date"], errors="coerce")
     operations["amount"] = pd.to_numeric(operations["amount"], errors="coerce").abs()
     direction = operations["direction"].astype("string").str.strip().str.lower()
-    incoming = direction.isin(["поступление", "поступление ", "income", "credit"])
-    outgoing = direction.isin(["списание", "расход", "expense", "debit"])
-    invalid_direction = ~(incoming | outgoing)
-    if invalid_direction.any():
-        raise ValueError(f"Неизвестное направление в {int(invalid_direction.sum())} строках.")
+    incoming = direction.isin(["поступление", "income", "credit", "входящее"])
+    outgoing = direction.isin(["списание", "расход", "expense", "debit", "исходящее"])
     operations["signed_amount"] = operations["amount"].where(incoming, -operations["amount"])
     operations["balance_eod"] = pd.to_numeric(operations["balance_eod"], errors="coerce")
     for field in ("counterparty_inn", "counterparty_name", "payment_purpose"):
         if field not in operations:
             operations[field] = ""
         operations[field] = operations[field].fillna("").astype("string").str.strip()
-    operations = operations.dropna(subset=["company_id", "operation_id", "operation_date", "amount", "balance_eod"])
+    valid_direction = incoming | outgoing
+    operations = operations.loc[valid_direction].copy()
+    operations["operation_id"] = operations["operation_id"].fillna("")
+    missing_operation_id = operations["operation_id"].eq("")
+    operations.loc[missing_operation_id, "operation_id"] = [
+        f"{source_path.stem}-{index}" for index in operations.index[missing_operation_id]
+    ]
+    operations = operations.dropna(subset=["company_id", "operation_date", "amount", "balance_eod"])
     operations = operations.loc[operations["amount"] > 0]
     operations["date"] = operations["operation_date"].dt.normalize()
     operations["account"] = operations["company_id"].astype(str)

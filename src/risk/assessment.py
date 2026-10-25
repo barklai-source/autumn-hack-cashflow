@@ -74,17 +74,32 @@ def assess_risk(
     samples = bootstrap_pool[starts[:, :, None] + offsets].reshape(bootstrap_iterations, -1)[:, :n]
     balances = base + np.cumsum(net[None, :] + samples, axis=1)
     minimum_balances = balances.min(axis=1)
-    probability = float(np.any(balances < reserve, axis=1).mean())
+    simulated_breaches = np.any(balances < reserve, axis=1)
+    probability = float(simulated_breaches.mean())
     p10, p90 = (float(value) for value in np.quantile(minimum_balances, [0.1, 0.9]))
     level = "высокий" if (probability is not None and probability >= 0.5) or (probability is None and first is not None and deficit > 0) else (
         "средний" if (probability is not None and probability >= 0.15) or first is not None else "низкий"
     )
     warning = None
-    if first is not None:
-        breach_date = pd.Timestamp(first["date"])
-        breach_balance = float(first["balance"])
-        reserve_shortfall = float(max(0, reserve - breach_balance))
-        zero_shortfall = float(max(0, -breach_balance))
+    warning_row = first
+    estimated_reserve_shortfall = None
+    estimated_zero_shortfall = None
+    if warning_row is None and simulated_breaches.any():
+        first_indices = np.argmax(balances[simulated_breaches] < reserve, axis=1)
+        most_common_index = int(np.bincount(first_indices, minlength=n).argmax())
+        warning_row = forecast.iloc[most_common_index]
+        breached_minimums = minimum_balances[simulated_breaches]
+        estimated_reserve_shortfall = float(np.maximum(0, reserve - breached_minimums).mean())
+        estimated_zero_shortfall = float(np.maximum(0, -breached_minimums).mean())
+    if warning_row is not None:
+        breach_date = pd.Timestamp(warning_row["date"])
+        breach_balance = float(warning_row["balance"])
+        reserve_shortfall = estimated_reserve_shortfall
+        if reserve_shortfall is None:
+            reserve_shortfall = float(max(0, reserve - breach_balance))
+        zero_shortfall = estimated_zero_shortfall
+        if zero_shortfall is None:
+            zero_shortfall = float(max(0, -breach_balance))
         recommended_amount = reserve_shortfall or zero_shortfall
         format_money = lambda amount: f"{amount:,.0f}".replace(",", " ")
         major_outflows = [
@@ -95,10 +110,17 @@ def assess_risk(
             f"{event['description']} — {format_money(abs(event['amount']))} ₽"
             for event in major_outflows
         )
-        reasons = (
-            f"Кассовый разрыв ожидается {breach_date:%d.%m.%Y}: дефицит до нуля "
-            f"{format_money(zero_shortfall)} ₽, до резерва — {format_money(reserve_shortfall)} ₽."
-        )
+        if first is None:
+            reasons = (
+                f"Блочный бутстрап выявил риск кассового разрыва около {breach_date:%d.%m.%Y}: "
+                f"средний дефицит до нуля {format_money(zero_shortfall)} ₽, "
+                f"до резерва — {format_money(reserve_shortfall)} ₽."
+            )
+        else:
+            reasons = (
+                f"Кассовый разрыв ожидается {breach_date:%d.%m.%Y}: дефицит до нуля "
+                f"{format_money(zero_shortfall)} ₽, до резерва — {format_money(reserve_shortfall)} ₽."
+            )
         if event_details:
             reasons += f" На период до разрыва приходятся крупные списания: {event_details}."
         warning = {
@@ -112,8 +134,9 @@ def assess_risk(
             "action": (
                 f"Для устранения кассового разрыва на сумму {format_money(recommended_amount)} ₽ "
                 f"к {breach_date:%d.%m.%Y} рекомендуется: 1) Согласовать перенос оплаты поставщикам "
-                "на 7–14 дней; 2) Запросить предоплату по ожидаемым договорам; "
-                f"3) При необходимости рассмотреть овердрафт на сумму от {format_money(recommended_amount)} ₽."
+                "на 7–14 дней; 2) Ускорить взыскание дебиторской задолженности и запросить предоплату "
+                "по договорам; 3) Рассмотреть овердрафт Банка Центр-инвест "
+                f"на сумму дефицита — около {format_money(recommended_amount)} ₽."
             ),
         }
     return {

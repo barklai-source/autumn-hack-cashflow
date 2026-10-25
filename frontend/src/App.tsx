@@ -6,6 +6,7 @@ import { Shell } from './components/Shell'
 import { LoginPage } from './pages/LoginPage'
 import type { AuthSession } from './types/api'
 import './styles.css'
+import './counterparty.css'
 
 const Dashboard = lazy(() => import('./pages/Dashboard').then((module) => ({ default: module.Dashboard })))
 const ForecastPage = lazy(() => import('./pages/ForecastPage').then((module) => ({ default: module.ForecastPage })))
@@ -49,7 +50,7 @@ function Application() {
   }
 
   return <QueryClientProvider client={client}><BrowserRouter><Suspense fallback={<div className="state">Загружаем страницу…</div>}>
-    {checkingSession ? <div className="state">Проверяем сессию…</div> : !session ? <LoginPage onLogin={changeSession} /> : <Routes><Route element={<Shell user={session} onLogout={() => { api.logout(); changeSession(null) }} />}>
+    {checkingSession ? <div className="state">Проверяем сессию…</div> : !session ? <LoginPage onLogin={changeSession} /> : <Routes><Route element={<Shell user={session} onSessionChange={changeSession} onLogout={() => { api.logout(); changeSession(null) }} />}>
     <Route index element={<Dashboard />} />
     <Route path="forecast" element={<ForecastPage />} />
     <Route path="operations" element={<OperationsPage />} />

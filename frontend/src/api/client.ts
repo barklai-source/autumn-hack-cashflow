@@ -19,7 +19,7 @@ function readSession(): AuthSession | null {
     const value = localStorage.getItem(AUTH_STORAGE_KEY)
     if (!value) return null
     const session = JSON.parse(value) as AuthSession
-    if (!session.token || !['admin', 'company'].includes(session.role)) return null
+    if (!session.token || !['admin', 'owner', 'company'].includes(session.role)) return null
     return session
   } catch {
     return null

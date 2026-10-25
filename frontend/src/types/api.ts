@@ -16,7 +16,7 @@ export type OperationsResponse = Page<Operation> & { needs_review_count?: number
 
 export type AuthSession = {
   token: string
-  role: 'admin' | 'company'
+  role: 'admin' | 'owner' | 'company'
   company_id: string | null
   display_name: string
   inn: string | null
@@ -46,6 +46,13 @@ export type Operation = {
   category_method: string
   confidence: number
   needs_review: boolean
+  counterparty_risk?: {
+    status: string
+    score: number
+    delay_probability: number
+    advice: string
+    source: string
+  } | null
 }
 
 export type Summary = {
@@ -118,6 +125,14 @@ export type ForecastResult = {
     reasons: string
     action: string
   } | null
+  calculation_trace?: CalculationTrace
+}
+
+export type CalculationTrace = {
+  company_id: string
+  horizon_days: number
+  generated_at: string
+  steps: { step: number; timestamp: string; title: string; details: string }[]
 }
 
 export type RisksResult = {
@@ -137,8 +152,11 @@ export type EventItem = {
   category: string
   event_type: string
   description: string
+  counterparty_inn?: string | null
+  counterparty_name?: string | null
   source: string
   status: 'Ожидается' | 'Подтверждено' | 'Исполнено' | 'Отменено'
+  counterparty_risk?: Operation['counterparty_risk']
 }
 
 export type RecurringItem = {
@@ -166,4 +184,48 @@ export type Evaluation = {
   metrics: Record<string, string | number | null>[]
   balance_horizons: Record<string, string | number | null>[]
   backtest: { date: string; method: string; actual_net: number; predicted_net: number }[]
+  calculation_trace?: CalculationTrace
+  quality_metrics?: {
+    train_test: { train_days: number; test_days: number; split_date: string | null }
+    comparison: {
+      method: string
+      MAE: number | null
+      MSE: number | null
+      RMSE: number | null
+      MAPE: number | null
+      R2: number | null
+      Accuracy: number | null
+      Precision: number | null
+      Recall: number | null
+      F1: number | null
+      ROC_AUC: number | null
+    }[]
+    cash_gap_confusion: {
+      TP: number
+      FP: number
+      FN: number
+      TN: number
+      Accuracy: number | null
+      Precision: number | null
+      Recall: number | null
+      F1: number | null
+      percentages: Record<'TP' | 'FP' | 'FN' | 'TN', number>
+      sample_count: number
+      roc_auc: number | null
+      forecast_risk_probability?: number | null
+    }
+    category_confusion: {
+      labels: string[]
+      matrix: number[][]
+      accuracy: number | null
+      sample_count: number
+      reference_note: string
+    }
+    diagnostics: {
+      missing_calendar_days: number
+      balance_inconsistencies: number
+      anomalies: number
+      anomaly_rule?: string
+    }
+  }
 }

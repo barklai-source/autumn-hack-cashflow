@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react'
 import { AlertTriangle, CalendarDays, Download, ShieldAlert, TrendingDown, TrendingUp } from 'lucide-react'
-import { BalanceChart, NetCashFlowChart } from '../components/dashboard/BalanceChart'
+import { useQuery } from '@tanstack/react-query'
+import { BalanceChart, NetCashFlowChart, PlanFactChart } from '../components/dashboard/BalanceChart'
+import { CalculationTrace } from '../components/CalculationTrace'
 import { QueryState } from '../components/State'
 import { useCompanyContext } from '../components/CompanyContext'
-import { useForecast } from '../hooks/queries'
-import type { ForecastScenario } from '../api/client'
+import { keys, useForecast } from '../hooks/queries'
+import { api, type ForecastScenario } from '../api/client'
 import { currency, dateRu, percent } from '../utils/format'
 
 const BASE_SCENARIO: ForecastScenario = {
@@ -31,6 +33,11 @@ export function ForecastPage() {
     return () => window.clearTimeout(timer)
   }, [scenario])
   const result = useForecast(company?.company_id, horizon, reserve, queryScenario)
+  const events = useQuery({
+    queryKey: keys.events(company?.company_id ?? ''),
+    queryFn: () => api.events(company!.company_id),
+    enabled: Boolean(company),
+  })
   const items = result.data?.items ?? []
   const firstForecastDate = items[0]?.date.slice(0, 10) ?? ''
   const effectiveShockDate = scenario.shock_date || firstForecastDate
@@ -48,6 +55,15 @@ export function ForecastPage() {
   const baseBreakDate = items.find((item) => item.baseline_balance !== null && item.baseline_balance < reserve)?.date.slice(0, 10) ?? null
   const scenarioBreakDate = items.find((item) => item.balance !== null && item.balance < reserve)?.date.slice(0, 10) ?? null
   const scenarioBreaksEarlier = Boolean(scenarioBreakDate && (!baseBreakDate || scenarioBreakDate < baseBreakDate))
+  const scenarioLabel = scenario.inflow_change_pct > 0
+    ? 'Позитивный сценарий (Что если)'
+    : 'Негативный сценарий (Что если)'
+  const baselineDeficit = baseMinimum === null ? null : Math.max(0, reserve - baseMinimum)
+  const scenarioDeficit = scenarioMinimum === null ? null : Math.max(0, reserve - scenarioMinimum)
+  const overdueEvents = (events.data?.items ?? []).filter((event) =>
+    event.date < new Date().toISOString().slice(0, 10)
+    && (event.status === 'Ожидается' || event.status === 'Подтверждено'),
+  )
   const isDebouncingScenario = Object.keys(scenario).some((key) =>
     scenario[key as keyof ForecastScenario] !== queryScenario[key as keyof ForecastScenario],
   )
@@ -108,26 +124,35 @@ export function ForecastPage() {
           <button className="button secondary" type="button" onClick={resetScenario}>Сбросить</button>
         </div>
         <div className="scenario-controls">
-          <label>Изменение поступлений (выручки), %<div className="scenario-range"><input aria-label="Изменение поступлений, %" type="range" min={-80} max={200} step={1} value={scenario.inflow_change_pct} onChange={(event) => updateScenario('inflow_change_pct', Number(event.target.value))} /><input aria-label="Ввести изменение поступлений, %" type="number" min={-80} max={200} value={scenario.inflow_change_pct} onChange={(event) => updateScenario('inflow_change_pct', Math.max(-80, Math.min(200, Number(event.target.value))))} /><output>{scenario.inflow_change_pct > 0 ? '+' : ''}{scenario.inflow_change_pct}%</output></div></label>
-          <label>Изменение расходов, %<div className="scenario-range"><input aria-label="Изменение расходов, %" type="range" min={-80} max={200} step={1} value={scenario.outflow_change_pct} onChange={(event) => updateScenario('outflow_change_pct', Number(event.target.value))} /><input aria-label="Ввести изменение расходов, %" type="number" min={-80} max={200} value={scenario.outflow_change_pct} onChange={(event) => updateScenario('outflow_change_pct', Math.max(-80, Math.min(200, Number(event.target.value))))} /><output>{scenario.outflow_change_pct > 0 ? '+' : ''}{scenario.outflow_change_pct}%</output></div></label>
+          <label>Снижение выручки, %<div className="scenario-range"><input aria-label="Снижение выручки, %" type="range" min={0} max={30} step={1} value={Math.max(0, -scenario.inflow_change_pct)} onChange={(event) => updateScenario('inflow_change_pct', -Number(event.target.value))} /><output>{scenario.inflow_change_pct > 0 ? `+${scenario.inflow_change_pct}% рост` : `−${Math.abs(scenario.inflow_change_pct)}%`}</output></div></label>
+          <label>Рост постоянных расходов, %<div className="scenario-range"><input aria-label="Рост постоянных расходов, %" type="range" min={0} max={30} step={1} value={Math.max(0, scenario.outflow_change_pct)} onChange={(event) => updateScenario('outflow_change_pct', Number(event.target.value))} /><output>+{Math.max(0, scenario.outflow_change_pct)}%</output></div></label>
           <label>Корректировка чистого потока в день, ₽<div className="scenario-range"><input aria-label="Корректировка потока в день, ползунок" type="range" min={-300000} max={300000} step={5000} value={scenario.daily_net_adjustment} onChange={(event) => updateScenario('daily_net_adjustment', Number(event.target.value))} /><input aria-label="Корректировка потока в день, ₽" type="number" min={-500000} max={500000} step={5000} value={scenario.daily_net_adjustment} onChange={(event) => updateScenario('daily_net_adjustment', Math.max(-500000, Math.min(500000, Number(event.target.value))))} /></div></label>
-          <label>Задержка оплат от клиентов, дней<div className="scenario-range"><input aria-label="Задержка оплат, дней" type="range" min={0} max={30} step={1} value={scenario.delay_days} onChange={(event) => updateScenario('delay_days', Number(event.target.value))} /><output>{scenario.delay_days} дн.</output></div></label>
+          <label>Крупный клиент задержал оплату<select aria-label="Срок задержки оплаты" value={scenario.delay_days} onChange={(event) => updateScenario('delay_days', Number(event.target.value))}><option value={0}>Без задержки</option><option value={14}>2 недели</option><option value={21}>3 недели</option><option value={28}>4 недели</option></select></label>
           <label>Разовый платёж / сделка, ₽<input aria-label="Сумма разового платежа со знаком" type="number" step={1000} value={scenario.shock_amount} onChange={(event) => setScenario((current) => ({ ...current, shock_amount: Number(event.target.value), shock_date: current.shock_date || firstForecastDate }))} placeholder="+ поступление / − списание" /></label>
           <label>Дата разового платежа<input aria-label="Дата разового платежа" type="date" min={firstForecastDate} max={items.at(-1)?.date.slice(0, 10)} value={effectiveShockDate} onChange={(event) => updateScenario('shock_date', event.target.value)} disabled={!items.length} /></label>
         </div>
       </section>
+      {active && <section className="card scenario-comparison">
+        <div className="card-heading"><div><h2>Сравнение кассового разрыва</h2><p>Минимальный остаток сопоставлен с выбранным резервом {currency(reserve)}.</p></div></div>
+        <div className="metrics-grid">
+          <article className="metric-card"><div className="metric-title">Базовый прогноз</div><div className="metric-value">{baseBreakDate ? dateRu(baseBreakDate) : 'Разрыва нет'}</div><div className="metric-detail">дефицит: {currency(baselineDeficit ?? 0)}</div></article>
+          <article className="metric-card"><div className="metric-title">{scenarioLabel}</div><div className="metric-value">{scenarioBreakDate ? dateRu(scenarioBreakDate) : 'Разрыва нет'}</div><div className="metric-detail">дефицит: {currency(scenarioDeficit ?? 0)}{scenarioBreaksEarlier ? ' · наступает раньше' : ''}</div></article>
+        </div>
+      </section>}
       <div className="metrics-grid scenario-kpis">
         <article className="metric-card"><div className="metric-icon green"><TrendingUp size={19} /></div><div className="metric-title">Суммарные поступления</div><div className="metric-value">{currency(result.data.total_inflow)}</div><div className="metric-detail">база: {currency(baselineInflows)} · Δ {signedCurrency(result.data.total_inflow - baselineInflows)}</div></article>
         <article className="metric-card"><div className="metric-icon rose"><TrendingDown size={19} /></div><div className="metric-title">Суммарные списания</div><div className="metric-value">{currency(result.data.total_outflow)}</div><div className="metric-detail">база: {currency(baselineOutflows)} · Δ {signedCurrency(result.data.total_outflow - baselineOutflows)}</div></article>
         <article className="metric-card"><div className="metric-icon blue"><ShieldAlert size={19} /></div><div className="metric-title">Итоговый чистый поток за период</div><div className="metric-value">{currency(result.data.total_net_flow)}</div><div className="metric-detail">к базе: {signedCurrency(result.data.total_net_flow - result.data.baseline_total_net_flow)}</div></article>
       </div>
-      <section className="card chart-card"><div className="card-heading"><div><h2>Прогноз остатка</h2><p>Последний остаток на {dateRu(result.data.balance_date)} · метод: {result.data.method}</p></div><div className="forecast-chart-actions">{(result.isFetching || isDebouncingScenario) && <span className="tag recalculating">Пересчёт...</span>}<button className="button secondary" type="button" onClick={downloadCalendar}><Download size={16} />Скачать платёжный календарь (CSV)</button><span className="tag">{horizon} дней</span></div></div><BalanceChart points={items} history={result.data.history} reserve={reserve} /><p className="small-note">{result.data.uncertainty_note}</p></section>
+      <section className="card chart-card"><div className="card-heading"><div><h2>Прогноз остатка</h2><p>Последний остаток на {dateRu(result.data.balance_date)} · метод: {result.data.method}</p></div><div className="forecast-chart-actions">{(result.isFetching || isDebouncingScenario) && <span className="tag recalculating">Пересчёт...</span>}<button className="button secondary" type="button" onClick={downloadCalendar}><Download size={16} />Скачать платёжный календарь (CSV)</button><span className="tag">{horizon} дней</span></div></div><BalanceChart points={items} history={result.data.history} reserve={reserve} scenarioLabel={scenarioLabel} /><p className="small-note">{result.data.uncertainty_note}</p></section>
+      <section className="card chart-card"><div className="card-heading"><div><h2>План-факт</h2><p>Факт по последним операциям; будущий план — базовый прогноз. Исторический план сравнения оценивается по предыдущим одноимённым дням недели.</p></div><span className="tag good">Автопересчёт: базовый расчёт переиспользуется из кэша</span></div><PlanFactChart points={items} history={result.data.history} />{overdueEvents.length > 0 && <div className="notice warning-card"><strong>Просроченные платежи: {overdueEvents.length}</strong><span>{overdueEvents.slice(0, 3).map((event) => `${event.description || event.event_type} · ${dateRu(event.date)} · ${currency(event.amount)}`).join(' | ')}</span></div>}</section>
       <section className="card chart-card"><div className="card-heading"><div><h2>Динамика чистого потока по дням</h2><p>Поступления, списания и итоговый чистый поток, ₽</p></div></div><NetCashFlowChart points={items} /></section>
       {active && <section className="notice scenario-comparison"><ShieldAlert size={18} /><span>Минимальный остаток: базовый {currency(baseMinimum)} · сценарный {currency(scenarioMinimum)}. {scenarioBreaksEarlier ? `Сценарный разрыв наступит раньше: ${dateRu(scenarioBreakDate)}.` : 'Сценарий не переносит разрыв на более раннюю дату.'}</span></section>}
       <div className="metrics-grid">
         <article className="metric-card"><div className="metric-icon amber"><CalendarDays size={19} /></div><div className="metric-title">Риск нарушения резерва</div><div className="metric-value">{result.data.risk.risk_level}</div><div className="metric-detail">вероятность: {percent(result.data.risk.probability)}</div></article>
       </div>
       {result.data.warning ? <section className="card warning-card"><div className="warning-heading"><AlertTriangle size={20} /><h2>Возможное снижение остатка ниже резерва</h2></div><p><strong>{dateRu(result.data.warning.date)}</strong> — прогнозная нехватка {currency(result.data.warning.deficit)}. {result.data.warning.reasons}</p><p>{result.data.warning.action}</p><p className="small-note">Риск рассчитан методом: {result.data.risk.method}</p></section> : <div className="notice"><ShieldAlert size={17} /> Детерминированный прогноз не показывает пересечения выбранного резерва.</div>}
+      <CalculationTrace trace={result.data.calculation_trace} />
     </>}</QueryState>
   </div>
 }

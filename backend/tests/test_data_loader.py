@@ -1,3 +1,5 @@
+import sqlite3
+
 import pandas as pd
 
 from app.services import data_loader
@@ -132,6 +134,38 @@ def test_missing_dataset_returns_a_diagnostic_instead_of_crashing(tmp_path):
     assert result.operations.empty
 
 
+def test_csv_loader_accepts_supported_encodings_delimiters_and_missing_optional_values(tmp_path):
+    cases = (
+        ("utf-8", ","),
+        ("utf-8-sig", ";"),
+        ("cp1251", "\t"),
+    )
+    for index, (encoding, delimiter) in enumerate(cases):
+        directory = tmp_path / str(index)
+        directory.mkdir()
+        company_csv = (
+            f" company_id {delimiter} name {delimiter} inn\n"
+            f"C{index + 1:03d}{delimiter}Тестовая компания{delimiter}\n"
+        )
+        operations_csv = (
+            f" company_id {delimiter} operation_date {delimiter} amount {delimiter} direction "
+            f"{delimiter} balance_eod {delimiter} counterparty_inn {delimiter} payment_purpose\n"
+            f"C{index + 1:03d}{delimiter}2025-03-01{delimiter}1500{delimiter}Поступление"
+            f"{delimiter}2500{delimiter}{delimiter}\n"
+        )
+        (directory / "companies.csv").write_text(company_csv, encoding=encoding)
+        (directory / "all_operations.csv").write_text(operations_csv, encoding=encoding)
+
+        dataset = load_dataset(directory)
+
+        assert dataset.status == "ready"
+        assert len(dataset.operations) == 1
+        assert dataset.operations.iloc[0]["counterparty_inn"] == ""
+        assert dataset.operations.iloc[0]["payment_purpose"] == ""
+        assert dataset.operations.iloc[0]["operation_id"]
+        assert len(dataset.companies.iloc[0]["inn"]) == 10
+
+
 def test_daily_balance_validation_does_not_report_gaps_as_zero_flow_days():
     rows = pd.DataFrame({
         "company_id": ["A", "A"], "date": pd.to_datetime(["2025-01-01", "2025-01-04"]),
@@ -152,6 +186,48 @@ def test_store_indexes_events_and_manual_categories_by_company_and_date(tmp_path
 
     assert "idx_events_company_date" in event_indexes
     assert "idx_category_overrides_company_updated_at" in category_indexes
+
+
+def test_store_migrates_legacy_users_and_event_owner_scope(tmp_path):
+    database = tmp_path / "legacy.sqlite"
+    with sqlite3.connect(database) as connection:
+        connection.executescript("""
+            CREATE TABLE users (
+                inn TEXT PRIMARY KEY,
+                company_id TEXT NOT NULL,
+                company_name TEXT NOT NULL,
+                password TEXT NOT NULL,
+                role TEXT NOT NULL CHECK (role IN ('admin', 'company'))
+            );
+            INSERT INTO users VALUES ('7701001001', 'C001', 'Компания', 'legacy-hash', 'company');
+            CREATE TABLE future_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_id TEXT NOT NULL,
+                event_date TEXT NOT NULL,
+                amount REAL NOT NULL,
+                direction TEXT NOT NULL,
+                category TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT 'ручной ввод',
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+
+    store = SQLiteStore(database)
+    legacy_user = store.get_user("7701001001")
+
+    assert legacy_user is not None and legacy_user["role"] == "company"
+    store.create_user({
+        "inn": "7712345678", "company_id": "C001", "company_name": "Новая",
+        "password": "hashed", "role": "owner",
+    })
+    with store.connection() as connection:
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(future_events)")}
+
+    assert store.get_user("7712345678")["role"] == "owner"
+    assert {"owner_inn", "counterparty_inn", "counterparty_name"} <= columns
 
 
 def test_event_cleanup_removes_test_amounts_and_same_company_duplicates(tmp_path):

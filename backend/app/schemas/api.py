@@ -23,7 +23,7 @@ class DatasetSwitchRequest(BaseModel):
 
 class AuthResponse(BaseModel):
     token: str
-    role: Literal["admin", "company"]
+    role: Literal["admin", "owner", "company"]
     company_id: str | None
     display_name: str
     inn: str | None = None
@@ -36,6 +36,8 @@ class EventCreate(BaseModel):
     category: str = Field(min_length=1, max_length=100)
     event_type: str = Field(default="пользовательское событие", max_length=100)
     description: str = Field(default="", max_length=1000)
+    counterparty_inn: str | None = Field(default=None, max_length=12)
+    counterparty_name: str | None = Field(default=None, max_length=200)
     source: str = Field(default="ручной ввод", max_length=150)
     status: Literal["Ожидается", "Подтверждено", "Исполнено", "Отменено"] = "Ожидается"
 
@@ -47,6 +49,8 @@ class EventPatch(BaseModel):
     category: str | None = Field(default=None, min_length=1, max_length=100)
     event_type: str | None = Field(default=None, max_length=100)
     description: str | None = Field(default=None, max_length=1000)
+    counterparty_inn: str | None = Field(default=None, max_length=12)
+    counterparty_name: str | None = Field(default=None, max_length=200)
     source: str | None = Field(default=None, max_length=150)
     status: Literal["Ожидается", "Подтверждено", "Исполнено", "Отменено"] | None = None
 
@@ -68,6 +72,8 @@ class EventOut(BaseModel):
     category: str
     event_type: str
     description: str
+    counterparty_inn: str | None = None
+    counterparty_name: str | None = None
     source: str
     status: str
 
