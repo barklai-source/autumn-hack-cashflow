@@ -27,16 +27,16 @@ export function BalanceChart({ points, history = [], reserve = 0, scenarioLabel 
         <CartesianGrid stroke="#edf0f5" vertical={false} />
         <XAxis dataKey="shortDate" tickLine={false} axisLine={false} minTickGap={32} />
         <YAxis tickFormatter={(value: number) => `${Math.round(value / 1000)} тыс.`} tickLine={false} axisLine={false} width={64} />
-        <Tooltip labelFormatter={(_, entries) => dateRu(entries[0]?.payload.date)} formatter={(value, name) => [currency(Number(value)), String(name)]} />
+        <Tooltip wrapperStyle={{ pointerEvents: 'none' }} labelFormatter={(_, entries) => dateRu(entries[0]?.payload.date)} formatter={(value, name) => [currency(Number(value)), String(name)]} />
         <Legend />
         <ReferenceLine y={0} stroke="#db6c6c" strokeDasharray="5 5" label="Ноль" />
         {reserve > 0 && <ReferenceLine y={reserve} stroke="#e5a53d" strokeDasharray="4 4" label="Резерв" />}
         <Area type="monotone" dataKey="upper" stroke="none" fill="transparent" name="Верхняя оценка" connectNulls />
         <Area type="monotone" dataKey="lower" stroke="none" fill="url(#balanceFill)" name="Диапазон оценки" connectNulls />
-        <Line type="monotone" dataKey="actualBalance" stroke="#3978c5" strokeWidth={2} dot={false} name="Фактический остаток" connectNulls={false} />
-        <Line type="monotone" dataKey="baselineBalance" stroke="#258a6a" strokeWidth={2.5} dot={false} name="Базовый прогноз остатка" connectNulls />
-        <Line type="monotone" dataKey="scenarioBalance" stroke="#9b59b6" strokeWidth={2.5} strokeDasharray="7 5" dot={false} name={scenarioLabel} connectNulls />
-        <Line type="monotone" dataKey="event_flow" stroke="#d4952e" strokeWidth={1} dot={false} name="События, чистый поток" />
+        <Line type="monotone" dataKey="actualBalance" stroke="#3978c5" strokeWidth={2} dot={false} activeDot={{ r: 4, pointerEvents: 'none' }} isAnimationActive={false} name="Фактический остаток" connectNulls={false} />
+        <Line type="monotone" dataKey="baselineBalance" stroke="#258a6a" strokeWidth={2.5} dot={false} activeDot={{ r: 4, pointerEvents: 'none' }} isAnimationActive={false} name="Базовый прогноз остатка" connectNulls />
+        <Line type="monotone" dataKey="scenarioBalance" stroke="#9b59b6" strokeWidth={2.5} strokeDasharray="7 5" dot={false} activeDot={{ r: 4, pointerEvents: 'none' }} isAnimationActive={false} name={scenarioLabel} connectNulls />
+        <Line type="monotone" dataKey="event_flow" stroke="#d4952e" strokeWidth={1} dot={false} activeDot={{ r: 4, pointerEvents: 'none' }} isAnimationActive={false} name="События, чистый поток" />
       </AreaChart>
     </ResponsiveContainer>
   </div>
@@ -54,12 +54,12 @@ export function NetCashFlowChart({ points }: { points: ForecastPoint[] }) {
         <CartesianGrid stroke="#edf0f5" vertical={false} />
         <XAxis dataKey="shortDate" tickLine={false} axisLine={false} minTickGap={32} />
         <YAxis tickFormatter={(value: number) => `${Math.round(value / 1000)} тыс.`} tickLine={false} axisLine={false} width={64} />
-        <Tooltip labelFormatter={(_, entries) => dateRu(entries[0]?.payload.date)} formatter={(value, name) => [currency(Number(value)), String(name)]} />
+        <Tooltip wrapperStyle={{ pointerEvents: 'none' }} labelFormatter={(_, entries) => dateRu(entries[0]?.payload.date)} formatter={(value, name) => [currency(Number(value)), String(name)]} />
         <Legend />
         <ReferenceLine y={0} stroke="#a8b2bd" />
         <Bar dataKey="inflow" fill="#28a879" fillOpacity={0.72} name="Поступления" />
         <Bar dataKey="outflow" fill="#e27474" fillOpacity={0.72} name="Списания" />
-        <Line type="monotone" dataKey="net_flow" stroke="#376fbd" strokeWidth={2.5} dot={false} name="Чистый поток" />
+        <Line type="monotone" dataKey="net_flow" stroke="#376fbd" strokeWidth={2.5} dot={false} activeDot={{ r: 4, pointerEvents: 'none' }} isAnimationActive={false} name="Чистый поток" />
       </ComposedChart>
     </ResponsiveContainer>
   </div>
@@ -105,12 +105,12 @@ export function PlanFactChart({ points, history }: {
         <CartesianGrid stroke="#edf0f5" vertical={false} />
         <XAxis dataKey="shortDate" tickLine={false} axisLine={false} minTickGap={32} />
         <YAxis tickFormatter={(value: number) => `${Math.round(value / 1000)} тыс.`} tickLine={false} axisLine={false} width={64} />
-        <Tooltip labelFormatter={(_, entries) => dateRu(entries[0]?.payload.date)} formatter={(value, name) => [currency(Number(value)), String(name)]} />
+        <Tooltip wrapperStyle={{ pointerEvents: 'none' }} labelFormatter={(_, entries) => dateRu(entries[0]?.payload.date)} formatter={(value, name) => [currency(Number(value)), String(name)]} />
         <Legend />
-        <Line type="monotone" dataKey="actualInflow" stroke="#258a6a" strokeWidth={2} dot={false} name="Факт поступлений" connectNulls={false} />
-        <Line type="monotone" dataKey="plannedInflow" stroke="#258a6a" strokeDasharray="5 4" dot={false} name="План поступлений" connectNulls={false} />
-        <Line type="monotone" dataKey="actualOutflow" stroke="#d16b6b" strokeWidth={2} dot={false} name="Факт списаний" connectNulls={false} />
-        <Line type="monotone" dataKey="plannedOutflow" stroke="#d16b6b" strokeDasharray="5 4" dot={false} name="План списаний" connectNulls={false} />
+        <Line type="monotone" dataKey="actualInflow" stroke="#258a6a" strokeWidth={2} dot={false} activeDot={{ r: 4, pointerEvents: 'none' }} isAnimationActive={false} name="Факт поступлений" connectNulls={false} />
+        <Line type="monotone" dataKey="plannedInflow" stroke="#258a6a" strokeDasharray="5 4" dot={false} activeDot={{ r: 4, pointerEvents: 'none' }} isAnimationActive={false} name="План поступлений" connectNulls={false} />
+        <Line type="monotone" dataKey="actualOutflow" stroke="#d16b6b" strokeWidth={2} dot={false} activeDot={{ r: 4, pointerEvents: 'none' }} isAnimationActive={false} name="Факт списаний" connectNulls={false} />
+        <Line type="monotone" dataKey="plannedOutflow" stroke="#d16b6b" strokeDasharray="5 4" dot={false} activeDot={{ r: 4, pointerEvents: 'none' }} isAnimationActive={false} name="План списаний" connectNulls={false} />
       </ComposedChart>
     </ResponsiveContainer>
   </div>

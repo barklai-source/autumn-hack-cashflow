@@ -13,11 +13,13 @@ import uuid
 import zipfile
 from datetime import date, datetime, timezone
 from pathlib import Path, PurePosixPath
+from typing import Annotated
 
 import numpy as np
 import pandas as pd
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse
+from pydantic import BeforeValidator
 
 from app.core.auth import (
     DEMO_INN_ORDINALS,
@@ -50,6 +52,10 @@ VALID_CATEGORIES = (
     "Оборудование и капитальные расходы", "Переводы между собственными счетами",
     "Прочие поступления", "Прочие расходы", "Требует проверки",
 )
+
+
+def _null_query_float(value: object) -> object:
+    return None if isinstance(value, str) and value.lower() == "null" else value
 
 
 def _json_value(value):
@@ -862,8 +868,12 @@ def forecast(
     outflow_change_pct: float = Query(default=0, ge=-80, le=200),
     daily_net_adjustment: float = Query(default=0, ge=-500000, le=500000),
     delay_days: int = Query(default=0, ge=0, le=30),
-    shock_amount: float = Query(default=0, ge=-1000000000, le=1000000000),
-    shock_date: date | None = None,
+    shock_amount: Annotated[
+        float | None,
+        Query(ge=-1000000000, le=1000000000),
+        BeforeValidator(_null_query_float),
+    ] = 0,
+    shock_date: str | None = None,
 ):
     if horizon not in (30, 60, 90):
         raise HTTPException(status_code=422, detail="Горизонт прогноза должен быть 30, 60 или 90 дней.")
@@ -874,12 +884,17 @@ def forecast(
         result, details, risk = _cached_calculation(
             request, company, frame, store, horizon, reserve, scenarios,
         )
-        if shock_amount and shock_date is None:
-            raise HTTPException(status_code=422, detail="Для разового платежа укажите дату.")
-        if shock_amount and shock_date is not None:
+        effective_shock_date = None
+        if shock_amount:
+            if not shock_date:
+                raise HTTPException(status_code=422, detail="Для разового платежа укажите дату.")
+            try:
+                effective_shock_date = date.fromisoformat(shock_date)
+            except ValueError as error:
+                raise HTTPException(status_code=422, detail="Укажите корректную дату разового платежа.") from error
             forecast_dates = pd.to_datetime(result["date"]).dt.date
-            if shock_date not in set(forecast_dates):
-                raise HTTPException(status_code=422, detail="Дата разового платежа должна входить в горизонт прогноза.")
+            if not forecast_dates.empty:
+                effective_shock_date = min(max(effective_shock_date, forecast_dates.min()), forecast_dates.max())
         current_balance = details["current_balance"]
         baseline_result = result
         scenario_result = apply_cash_flow_scenario(
@@ -889,8 +904,8 @@ def forecast(
             outflow_change_pct=outflow_change_pct,
             daily_net_adjustment=daily_net_adjustment,
             delay_days=delay_days,
-            shock_amount=shock_amount,
-            shock_date=shock_date,
+            shock_amount=shock_amount or 0,
+            shock_date=effective_shock_date,
         )
         daily_history = frame.groupby("date", as_index=False).agg(
             balance=("balance_eod", "last"),
@@ -932,7 +947,7 @@ def forecast(
             "daily_net_adjustment": daily_net_adjustment,
             "delay_days": delay_days,
             "shock_amount": shock_amount,
-            "shock_date": shock_date.isoformat() if shock_date else None,
+            "shock_date": shock_date,
         },
         build,
     )

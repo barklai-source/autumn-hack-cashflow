@@ -27,6 +27,7 @@ export function ForecastPage() {
   const [horizon, setHorizon] = useState(90)
   const [reserve, setReserve] = useState(250000)
   const [scenario, setScenario] = useState(BASE_SCENARIO)
+  const [hasManualShockDate, setHasManualShockDate] = useState(false)
   const [queryScenario, setQueryScenario] = useState(scenario)
   useEffect(() => {
     const timer = window.setTimeout(() => setQueryScenario(scenario), 225)
@@ -71,8 +72,12 @@ export function ForecastPage() {
   const updateScenario = <K extends keyof ForecastScenario>(key: K, value: ForecastScenario[K]) => {
     setScenario((current) => ({ ...current, [key]: value }))
   }
-  const resetScenario = () => setScenario(BASE_SCENARIO)
+  const resetScenario = () => {
+    setHasManualShockDate(false)
+    setScenario(BASE_SCENARIO)
+  }
   const setPreset = (kind: 'growth' | 'stress' | 'gap') => {
+    setHasManualShockDate(false)
     const shockDate = firstForecastDate
     if (kind === 'growth') {
       setScenario({ ...BASE_SCENARIO, inflow_change_pct: 40 })
@@ -113,7 +118,8 @@ export function ForecastPage() {
   return <div className="page-stack">
     <div className="page-heading"><div><div className="eyebrow">ПЛАНИРОВАНИЕ</div><h1>Прогноз и риски</h1><p>Управляйте чистым денежным потоком и проверяйте сценарии в реальном времени.</p></div></div>
     <div className="card filter-card"><label>Горизонт прогноза<select value={horizon} onChange={(event) => setHorizon(Number(event.target.value))}><option value={30}>30 дней</option><option value={60}>60 дней</option><option value={90}>90 дней</option></select></label><label>Минимальный резерв, ₽<input aria-label="Минимальный резерв" type="number" min={0} step={50000} value={reserve} onChange={(event) => setReserve(Math.max(0, Number(event.target.value)))} /></label></div>
-    <QueryState isLoading={result.isLoading && !result.data} error={result.error as Error | null}>{result.data && <>
+    <QueryState isLoading={result.isLoading && !result.data} error={result.data ? null : result.error as Error | null}>{result.data && <>
+      {result.error && <div className="notice warning-card" role="alert">Не удалось пересчитать сценарий: {result.error.message}. Показан последний успешно рассчитанный прогноз.</div>}
       <section className="card scenario-card">
         <div className="card-heading"><div><h2>Управление чистым потоком и сценарии «Что если»</h2><p>Изменяйте параметры и наблюдайте влияние на прогнозируемые поступления, списания и остаток.</p></div></div>
         <div className="scenario-presets">
@@ -128,8 +134,14 @@ export function ForecastPage() {
           <label>Рост постоянных расходов, %<div className="scenario-range"><input aria-label="Рост постоянных расходов, %" type="range" min={0} max={30} step={1} value={Math.max(0, scenario.outflow_change_pct)} onChange={(event) => updateScenario('outflow_change_pct', Number(event.target.value))} /><output>+{Math.max(0, scenario.outflow_change_pct)}%</output></div></label>
           <label>Корректировка чистого потока в день, ₽<div className="scenario-range"><input aria-label="Корректировка потока в день, ползунок" type="range" min={-300000} max={300000} step={5000} value={scenario.daily_net_adjustment} onChange={(event) => updateScenario('daily_net_adjustment', Number(event.target.value))} /><input aria-label="Корректировка потока в день, ₽" type="number" min={-500000} max={500000} step={5000} value={scenario.daily_net_adjustment} onChange={(event) => updateScenario('daily_net_adjustment', Math.max(-500000, Math.min(500000, Number(event.target.value))))} /></div></label>
           <label>Крупный клиент задержал оплату<select aria-label="Срок задержки оплаты" value={scenario.delay_days} onChange={(event) => updateScenario('delay_days', Number(event.target.value))}><option value={0}>Без задержки</option><option value={14}>2 недели</option><option value={21}>3 недели</option><option value={28}>4 недели</option></select></label>
-          <label>Разовый платёж / сделка, ₽<input aria-label="Сумма разового платежа со знаком" type="number" step={1000} value={scenario.shock_amount} onChange={(event) => setScenario((current) => ({ ...current, shock_amount: Number(event.target.value), shock_date: current.shock_date || firstForecastDate }))} placeholder="+ поступление / − списание" /></label>
-          <label>Дата разового платежа<input aria-label="Дата разового платежа" type="date" min={firstForecastDate} max={items.at(-1)?.date.slice(0, 10)} value={effectiveShockDate} onChange={(event) => updateScenario('shock_date', event.target.value)} disabled={!items.length} /></label>
+          <label>Разовый платёж / сделка, ₽<input aria-label="Сумма разового платежа со знаком" type="number" step={1000} value={scenario.shock_amount} onChange={(event) => setScenario((current) => {
+            const amount = Number(event.target.value)
+            return { ...current, shock_amount: amount, shock_date: amount ? current.shock_date || firstForecastDate : hasManualShockDate ? current.shock_date : '' }
+          })} placeholder="+ поступление / − списание" /></label>
+          <label>Дата разового платежа<input aria-label="Дата разового платежа" type="date" min={firstForecastDate} max={items.at(-1)?.date.slice(0, 10)} value={effectiveShockDate} onChange={(event) => {
+            setHasManualShockDate(Boolean(event.target.value))
+            updateScenario('shock_date', event.target.value)
+          }} disabled={!items.length} /></label>
         </div>
       </section>
       {active && <section className="card scenario-comparison">

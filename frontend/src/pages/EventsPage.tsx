@@ -18,7 +18,7 @@ const schema = z.object({
   category: z.string().min(1),
   event_type: z.string().min(1),
   description: z.string().max(1000),
-  counterparty_inn: z.string().max(12).optional(),
+  counterparty_inn: z.string().max(12).refine((value) => !value || /^\d{10}(\d{2})?$/.test(value), 'ИНН должен содержать ровно 10 или 12 цифр').optional(),
   counterparty_name: z.string().max(200).optional(),
   source: z.string().min(1),
   status: z.enum(['Ожидается', 'Подтверждено', 'Исполнено', 'Отменено']),
@@ -129,8 +129,8 @@ export function EventsPage() {
           <label>Статус<select {...form.register('status')}><option>Ожидается</option><option>Подтверждено</option><option>Исполнено</option><option>Отменено</option></select></label>
           <label className={`full-field ${nlpFilled.has('description') ? 'nlp-filled' : ''}`}>Описание<input placeholder="Например: счёт поставщика за сырьё" {...form.register('description')} /></label>
           <label>Контрагент<input autoComplete="organization" placeholder="Название организации" {...form.register('counterparty_name')} /></label>
-          <label>ИНН контрагента<input inputMode="numeric" placeholder="10 или 12 цифр" maxLength={12} {...form.register('counterparty_inn')} /></label>
-          <button className="button primary full-field" type="submit" disabled={create.isPending || update.isPending}>{editingId !== null ? 'Сохранить изменения' : 'Сохранить событие'}</button>
+          <label>ИНН контрагента<input inputMode="numeric" placeholder="10 цифр (юрлицо) или 12 цифр (ИП)" maxLength={12} {...form.register('counterparty_inn', { onChange: (event) => form.setValue('counterparty_inn', event.target.value.replace(/\D/g, '').slice(0, 12), { shouldDirty: true, shouldValidate: true }) })} /><small>Оставьте поле пустым или введите ровно 10 либо 12 цифр.</small>{form.formState.errors.counterparty_inn && <small className="field-error">{form.formState.errors.counterparty_inn.message}</small>}</label>
+          <button className="button primary full-field" type="submit" disabled={create.isPending || update.isPending || Boolean(form.watch('counterparty_inn') && !/^\d{10}(\d{2})?$/.test(form.watch('counterparty_inn') ?? ''))}>{editingId !== null ? 'Сохранить изменения' : 'Сохранить событие'}</button>
           {editingId !== null && <button className="button secondary full-field" type="button" onClick={() => { setEditingId(null); form.reset({ ...form.getValues(), date: defaultEventDate, description: '' }) }}>Отменить редактирование</button>}
         </form>
       </section>

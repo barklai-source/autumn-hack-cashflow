@@ -11,6 +11,7 @@ type Credentials = { username: string; password: string }
 export function LoginPage({ onLogin }: { onLogin: (session: AuthSession) => void }) {
   const [tab, setTab] = useState<LoginTab>('login')
   const [username, setUsername] = useState('')
+  const isValidInn = (value: string) => /^\d{10}(\d{2})?$/.test(value)
   const [password, setPassword] = useState('')
   const [inn, setInn] = useState('')
   const [companyName, setCompanyName] = useState('')
@@ -61,6 +62,7 @@ export function LoginPage({ onLogin }: { onLogin: (session: AuthSession) => void
 
   const handleLogin = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    if (!isValidInn(username)) return
     void submit({ username, password })
   }
 
@@ -81,19 +83,19 @@ export function LoginPage({ onLogin }: { onLogin: (session: AuthSession) => void
         <button type="button" role="tab" aria-selected={tab === 'register'} className={tab === 'register' ? 'active' : ''} onClick={() => { setTab('register'); setError('') }}>Регистрация по ИНН</button>
       </div>
       {tab === 'login' ? <form className="login-form" onSubmit={handleLogin}>
-        <label>ИНН или логин<input autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} placeholder="10 или 12 цифр либо admin" required /></label>
+        <label>ИНН<input inputMode="numeric" autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value.replace(/\D/g, '').slice(0, 12))} minLength={10} maxLength={12} pattern="\d{10}|\d{12}" placeholder="10 цифр (юрлицо) или 12 цифр (ИП)" required /><small>Введите ровно 10 цифр для юрлица или 12 цифр для ИП.</small></label>
         <label>Пароль<input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required /></label>
         {error && <p className="login-error" role="alert">{error}</p>}
-        <button className="button primary login-submit" type="submit" disabled={isLoading}>{isLoading ? 'Входим…' : 'Войти'} <LogIn size={17} /></button>
+        <button className="button primary login-submit" type="submit" disabled={isLoading || !isValidInn(username)}>{isLoading ? 'Входим…' : 'Войти'} <LogIn size={17} /></button>
       </form> : <form className="login-form" onSubmit={(event) => { void register(event) }}>
-        <label>ИНН организации<input inputMode="numeric" autoComplete="off" value={inn} onChange={(event) => { setInn(event.target.value.replace(/\D/g, '').slice(0, 12)); setLookupResult(null) }} minLength={10} maxLength={12} pattern="\d{10}|\d{12}" placeholder="10 или 12 цифр" required /></label>
-        <button className="button secondary lookup-button" type="button" disabled={isLoading || !/^\d{10}(\d{2})?$/.test(inn)} onClick={() => void lookup(inn)}><Search size={16} /> Найти организацию по ИНН</button>
+        <label>ИНН организации<input inputMode="numeric" autoComplete="off" value={inn} onChange={(event) => { setInn(event.target.value.replace(/\D/g, '').slice(0, 12)); setLookupResult(null) }} minLength={10} maxLength={12} pattern="\d{10}|\d{12}" placeholder="10 или 12 цифр" required /><small>Введите ровно 10 цифр для юрлица или 12 цифр для ИП.</small></label>
+        <button className="button secondary lookup-button" type="button" disabled={isLoading || !isValidInn(inn)} onClick={() => void lookup(inn)}><Search size={16} /> Найти организацию по ИНН</button>
         {lookupResult?.found && <div className="inn-result found"><Building2 size={18} /><span><strong>Найдена компания: {lookupResult.name}, {lookupResult.company_id}</strong><small>{lookupResult.industry || 'Отрасль не указана'}</small></span></div>}
         {lookupResult && !lookupResult.found && <div className="inn-result"><Building2 size={18} /><span><strong>Организация не найдена в демо-справочнике</strong><small>Для демонстрации будет подключён профиль компании по указанному названию.</small></span></div>}
         <label>Название организации (необязательно)<input autoComplete="organization" value={companyName} onChange={(event) => setCompanyName(event.target.value)} placeholder="Например, ООО Грузоперевозки" /></label>
         <label>Пароль<input type="password" autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} required /></label>
         {error && <p className="login-error" role="alert">{error}</p>}
-        <button className="button primary login-submit" type="submit" disabled={isLoading || !/^\d{10}(\d{2})?$/.test(inn)}>{isLoading ? 'Подключаем…' : 'Зарегистрировать и подключить счета'} <LogIn size={17} /></button>
+        <button className="button primary login-submit" type="submit" disabled={isLoading || !isValidInn(inn)}>{isLoading ? 'Подключаем…' : 'Зарегистрировать и подключить счета'} <LogIn size={17} /></button>
       </form>}
       <div className="demo-logins"><h2>Быстрый вход</h2>
         <button className="button primary" type="button" disabled={isLoading || !(demoCompanies.data?.items.length)} onClick={() => {

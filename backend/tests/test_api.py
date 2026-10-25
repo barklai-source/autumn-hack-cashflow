@@ -296,6 +296,18 @@ def test_model_evaluation_returns_one_row_per_date_with_method_columns(tmp_path,
         adjusted_forecast = client.get(
             "/api/companies/C001/forecast?horizon=30&daily_net_adjustment=1000",
         )
+        before_horizon_shock = client.get(
+            "/api/companies/C001/forecast?horizon=30&shock_amount=100&shock_date=2024-01-01",
+        )
+        after_horizon_shock = client.get(
+            "/api/companies/C001/forecast?horizon=30&shock_amount=-100&shock_date=2030-01-01",
+        )
+        zero_shock_with_out_of_range_date = client.get(
+            "/api/companies/C001/forecast?horizon=30&shock_amount=0&shock_date=2030-01-01",
+        )
+        null_shock_with_out_of_range_date = client.get(
+            "/api/companies/C001/forecast?horizon=30&shock_amount=null&shock_date=not-a-date",
+        )
         risk = client.get("/api/companies/C001/risks?horizon=30")
         summary = client.get("/api/companies/C001/summary?horizon=30")
         invalid_horizon = client.get("/api/companies/C001/forecast?horizon=31")
@@ -329,6 +341,16 @@ def test_model_evaluation_returns_one_row_per_date_with_method_columns(tmp_path,
     assert len(base_payload["items"]) == len(adjusted_payload["items"]) == 30
     assert base_payload["total_net_flow"] == base_payload["baseline_total_net_flow"]
     assert adjusted_payload["total_net_flow"] - adjusted_payload["baseline_total_net_flow"] == 30000
+    assert before_horizon_shock.status_code == 200
+    assert before_horizon_shock.json()["total_net_flow"] - base_payload["total_net_flow"] == 100
+    assert before_horizon_shock.json()["items"][0]["net_flow"] - base_payload["items"][0]["net_flow"] == 100
+    assert after_horizon_shock.status_code == 200
+    assert after_horizon_shock.json()["total_net_flow"] - base_payload["total_net_flow"] == -100
+    assert after_horizon_shock.json()["items"][-1]["net_flow"] - base_payload["items"][-1]["net_flow"] == -100
+    assert zero_shock_with_out_of_range_date.status_code == 200
+    assert zero_shock_with_out_of_range_date.json()["total_net_flow"] == base_payload["total_net_flow"]
+    assert null_shock_with_out_of_range_date.status_code == 200
+    assert null_shock_with_out_of_range_date.json()["total_net_flow"] == base_payload["total_net_flow"]
     assert all(item["net_flow"] == item["baseline_net_flow"] for item in base_payload["items"])
     assert all(item["balance"] == item["baseline_balance"] for item in base_payload["items"])
     assert risk.status_code == 200
