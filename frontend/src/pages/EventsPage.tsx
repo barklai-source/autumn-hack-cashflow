@@ -53,6 +53,7 @@ const NLP_EXAMPLES = [
 
 export function EventsPage() {
   const { company } = useCompanyContext()
+  const companyId = company?.company_id
   const client = useQueryClient()
   const fileInput = useRef<HTMLInputElement>(null)
   const [message, setMessage] = useState('')
@@ -60,7 +61,7 @@ export function EventsPage() {
   const [nlpText, setNlpText] = useState('')
   const [nlpError, setNlpError] = useState('')
   const [nlpFilled, setNlpFilled] = useState<Set<string>>(() => new Set())
-  const result = useQuery({ queryKey: keys.events(company?.company_id ?? ''), queryFn: () => api.events(company!.company_id), enabled: Boolean(company) })
+  const result = useQuery({ queryKey: keys.events(companyId ?? ''), queryFn: () => api.events(companyId ?? ''), enabled: Boolean(companyId) })
   const summary = useSummary(company?.company_id, 90, 0)
   const referenceDate = summary.data?.last_actual_date ?? summary.data?.balance_date ?? localToday()
   const defaultEventDate = addDaysToDate(referenceDate, 3)

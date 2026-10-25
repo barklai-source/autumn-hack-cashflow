@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Search, SlidersHorizontal, TriangleAlert } from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../api/client'
-import { QueryState, EmptyState } from '../components/State'
+import { CompanyEmptyState, QueryState, EmptyState } from '../components/State'
 import { useCompanyContext } from '../components/CompanyContext'
 import { keys } from '../hooks/queries'
 import { currency, dateRu } from '../utils/format'
@@ -11,7 +11,8 @@ import { currency, dateRu } from '../utils/format'
 const CATEGORIES = ['Выручка и поступления от клиентов','Закупки и поставщики','Фонд оплаты труда','Налоги и обязательные платежи','Аренда','Маркетинг и реклама','Логистика и транспорт','Комиссии банка','Кредиты и проценты','Лизинг','Оборудование и капитальные расходы','Переводы между собственными счетами','Прочие поступления','Прочие расходы','Требует проверки']
 
 export function OperationsPage() {
-  const { company } = useCompanyContext()
+  const { company, user } = useCompanyContext()
+  const companyId = company?.company_id
   const queryClient = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
   const [page, setPage] = useState(1)
@@ -30,15 +31,22 @@ export function OperationsPage() {
   if (startDate) params.set('start_date', startDate)
   if (endDate) params.set('end_date', endDate)
   const queryKey = params.toString()
-  const result = useQuery({ queryKey: keys.operations(company?.company_id ?? '', queryKey), queryFn: () => api.operations(company!.company_id, params) })
+  const result = useQuery({
+    queryKey: keys.operations(companyId ?? '', queryKey),
+    queryFn: () => api.operations(companyId ?? '', params),
+    enabled: Boolean(companyId),
+  })
   const categoryChange = useMutation({
-    mutationFn: ({ operationId, value }: { operationId: string; value: string }) => api.changeCategory(company!.company_id, operationId, value),
+    mutationFn: ({ operationId, value }: { operationId: string; value: string }) => {
+      if (!companyId) throw new Error('Сначала выберите компанию.')
+      return api.changeCategory(companyId, operationId, value)
+    },
     onSuccess: async () => {
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ['operations', company?.company_id] }),
-        queryClient.invalidateQueries({ queryKey: ['summary', company?.company_id] }),
-        queryClient.invalidateQueries({ queryKey: ['categories', company?.company_id] }),
-        queryClient.invalidateQueries({ queryKey: ['recurring', company?.company_id] }),
+        queryClient.invalidateQueries({ queryKey: ['operations', companyId] }),
+        queryClient.invalidateQueries({ queryKey: ['summary', companyId] }),
+        queryClient.invalidateQueries({ queryKey: ['categories', companyId] }),
+        queryClient.invalidateQueries({ queryKey: ['recurring', companyId] }),
       ])
     },
   })
@@ -51,6 +59,10 @@ export function OperationsPage() {
     else next.delete('category')
     setSearchParams(next, { replace: true })
   }
+  if (!companyId) return <div className="page-stack">
+    <div className="page-heading"><div><div className="eyebrow">ИСТОРИЯ КОМПАНИИ</div><h1>Операции</h1></div></div>
+    <section className="card"><CompanyEmptyState isAdmin={user?.role === 'admin'} /></section>
+  </div>
   return <div className="page-stack">
     <div className="page-heading"><div><div className="eyebrow">ИСТОРИЯ КОМПАНИИ</div><h1>Операции</h1><p>Постраничная загрузка с сервера. Корректировки категорий сохраняются в SQLite. Скоринг контрагентов — детерминированная демо-имитация открытых реестров, не официальная проверка ФНС.</p></div><span className="tag">{result.data?.total.toLocaleString('ru-RU') ?? '…'} операций</span></div>
     <section className="card">

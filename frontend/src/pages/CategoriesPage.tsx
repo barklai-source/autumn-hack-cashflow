@@ -10,7 +10,8 @@ const COLORS = ['#268a68','#5588d2','#e3a53b','#d77872','#8b74cd','#54a5b0','#d6
 
 export function CategoriesPage() {
   const { company } = useCompanyContext()
-  const result = useQuery({ queryKey: keys.categories(company?.company_id ?? ''), queryFn: () => api.categories(company!.company_id), enabled: Boolean(company) })
+  const companyId = company?.company_id
+  const result = useQuery({ queryKey: keys.categories(companyId ?? ''), queryFn: () => api.categories(companyId ?? ''), enabled: Boolean(companyId) })
   return <div className="page-stack"><div className="page-heading"><div><div className="eyebrow">СТРУКТУРА ДВИЖЕНИЯ ДЕНЕГ</div><h1>Категории</h1><p>Распределение по суммам операций; доля считается отдельно для поступлений и списаний.</p></div></div>
     <QueryState isLoading={result.isLoading} error={result.error as Error | null}>{result.data && <div className="content-grid">
       {(['поступление', 'списание'] as const).map((direction) => {

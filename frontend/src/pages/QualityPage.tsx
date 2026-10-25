@@ -3,7 +3,7 @@ import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, X
 import { ArrowDownRight, ArrowUpRight, Sparkles } from 'lucide-react'
 import { api } from '../api/client'
 import { CalculationTrace } from '../components/CalculationTrace'
-import { QueryState } from '../components/State'
+import { CompanyEmptyState, QueryState } from '../components/State'
 import { useCompanyContext } from '../components/CompanyContext'
 import { keys } from '../hooks/queries'
 import { currency } from '../utils/format'
@@ -27,8 +27,9 @@ function metricValue(value: number | null | undefined, percentage = false) {
 }
 
 export function QualityPage() {
-  const { company } = useCompanyContext()
-  const result = useQuery({ queryKey: keys.evaluation(company?.company_id ?? ''), queryFn: () => api.evaluation(company!.company_id), enabled: Boolean(company) })
+  const { company, user } = useCompanyContext()
+  const companyId = company?.company_id
+  const result = useQuery({ queryKey: keys.evaluation(companyId ?? ''), queryFn: () => api.evaluation(companyId ?? ''), enabled: Boolean(companyId) })
   const baseline = result.data?.metrics.find((row) => String(row.method).toLowerCase() === 'baseline')
   const ml = result.data?.metrics.find((row) => String(row.method).toLowerCase() === 'ml')
   const improvement = (metric: 'MAE' | 'WAPE') => {
@@ -43,6 +44,10 @@ export function QualityPage() {
   const quality = result.data?.quality_metrics
   const hybrid = quality?.comparison.find((row) => row.method.startsWith('Гибридный ансамбль'))
   const confusion = quality?.cash_gap_confusion
+  if (!companyId) return <div className="page-stack">
+    <div className="page-heading"><div><div className="eyebrow">ОТЛОЖЕННАЯ ИСТОРИЧЕСКАЯ ПРОВЕРКА</div><h1>Качество модели</h1></div></div>
+    <section className="card"><CompanyEmptyState isAdmin={user?.role === 'admin'} /></section>
+  </div>
   return <div className="page-stack"><div className="page-heading"><div><div className="eyebrow">ОТЛОЖЕННАЯ ИСТОРИЧЕСКАЯ ПРОВЕРКА</div><h1>Качество модели</h1><p>Временное разделение: прогноз каждой контрольной точки строится только на прошлом.</p></div></div>
     <QueryState isLoading={result.isLoading} error={result.error as Error | null}>{result.data && <>
       <div className="notice"><strong>Выбранный метод: {result.data.selected_method}.</strong> Оцениваются потоки, а не гарантированная точность будущего остатка. Показатели относятся к конкретной выбранной компании.</div>

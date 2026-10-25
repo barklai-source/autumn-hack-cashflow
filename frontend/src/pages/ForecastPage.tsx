@@ -3,7 +3,7 @@ import { AlertTriangle, CalendarDays, Download, ShieldAlert, TrendingDown, Trend
 import { useQuery } from '@tanstack/react-query'
 import { BalanceChart, NetCashFlowChart, PlanFactChart } from '../components/dashboard/BalanceChart'
 import { CalculationTrace } from '../components/CalculationTrace'
-import { QueryState } from '../components/State'
+import { CompanyEmptyState, QueryState } from '../components/State'
 import { useCompanyContext } from '../components/CompanyContext'
 import { keys, useForecast } from '../hooks/queries'
 import { api, type ForecastScenario } from '../api/client'
@@ -23,7 +23,7 @@ function signedCurrency(amount: number) {
 }
 
 export function ForecastPage() {
-  const { company } = useCompanyContext()
+  const { company, user } = useCompanyContext()
   const [horizon, setHorizon] = useState(90)
   const [reserve, setReserve] = useState(250000)
   const [scenario, setScenario] = useState(BASE_SCENARIO)
@@ -36,8 +36,8 @@ export function ForecastPage() {
   const result = useForecast(company?.company_id, horizon, reserve, queryScenario)
   const events = useQuery({
     queryKey: keys.events(company?.company_id ?? ''),
-    queryFn: () => api.events(company!.company_id),
-    enabled: Boolean(company),
+    queryFn: () => api.events(company?.company_id ?? ''),
+    enabled: Boolean(company?.company_id),
   })
   const items = result.data?.items ?? []
   const firstForecastDate = items[0]?.date.slice(0, 10) ?? ''
@@ -68,6 +68,11 @@ export function ForecastPage() {
   const isDebouncingScenario = Object.keys(scenario).some((key) =>
     scenario[key as keyof ForecastScenario] !== queryScenario[key as keyof ForecastScenario],
   )
+
+  if (!company?.company_id) return <div className="page-stack">
+    <div className="page-heading"><div><div className="eyebrow">ПЛАНИРОВАНИЕ</div><h1>Прогноз и риски</h1></div></div>
+    <section className="card"><CompanyEmptyState isAdmin={user?.role === 'admin'} /></section>
+  </div>
 
   const updateScenario = <K extends keyof ForecastScenario>(key: K, value: ForecastScenario[K]) => {
     setScenario((current) => ({ ...current, [key]: value }))

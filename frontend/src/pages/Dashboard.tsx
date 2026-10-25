@@ -5,18 +5,20 @@ import { Link } from 'react-router-dom'
 import { api } from '../api/client'
 import { BalanceChart } from '../components/dashboard/BalanceChart'
 import { MetricCard } from '../components/dashboard/MetricCard'
-import { QueryState } from '../components/State'
+import { CompanyEmptyState, QueryState } from '../components/State'
 import { useCompanyContext } from '../components/CompanyContext'
 import { keys, useForecast, useSummary } from '../hooks/queries'
 import { currency, dateRu, percent } from '../utils/format'
 
 export function Dashboard() {
-  const { company, dataAvailable } = useCompanyContext()
+  const { company, dataAvailable, user } = useCompanyContext()
   const id = company?.company_id
   const [forecastHorizon, setForecastHorizon] = useState<30 | 60 | 90>(90)
   const summary = useSummary(id, 90, 0)
   const forecast = useForecast(id, forecastHorizon, 0)
-  const events = useQuery({ queryKey: keys.events(id ?? ''), queryFn: () => api.events(id!), enabled: Boolean(id) })
+  const events = useQuery({ queryKey: keys.events(id ?? ''), queryFn: () => api.events(id ?? ''), enabled: Boolean(id) })
+
+  if (!company) return <section className="card"><CompanyEmptyState isAdmin={user?.role === 'admin'} /></section>
 
   if (!dataAvailable) return <section className="card empty-dataset">
     <div className="empty-dataset-icon"><Wallet size={28} /></div>
